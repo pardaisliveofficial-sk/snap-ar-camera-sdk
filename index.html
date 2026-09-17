@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SnapStream AR Camera SDK & Lens Studio</title>
+    <meta name="description" content="Web AR Camera SDK Prototype and Lens Studio filter authoring platform with real-time face tracking, multi-pass GPU beauty and effects engine, face-anchored AR filters, multi-platform SDK code packages, asset manager, and REST API." />
+    <meta property="og:title" content="SnapStream AR Camera SDK & Lens Studio" />
+    <meta property="og:description" content="Web AR Camera SDK Prototype and Lens Studio filter authoring platform with real-time face tracking, multi-pass GPU beauty and effects engine, face-anchored AR filters, multi-platform SDK code packages, asset manager, and REST API." />
+    <script>
+      (function() {
+        const isIgnored = function(arg) {
+          if (!arg) return false;
+          const s = typeof arg === "string" ? arg : (arg && arg.message ? String(arg.message) : String(arg));
+          return s.includes("XNNPACK delegate") ||
+                 s.includes("Created TensorFlow Lite") ||
+                 s.includes("TensorFlow Lite XNNPACK");
+        };
+
+        const origLog = console.log;
+        const origInfo = console.info;
+        const origWarn = console.warn;
+        const origError = console.error;
+
+        console.log = function(...args) {
+          if (args.some(isIgnored)) return;
+          origLog.apply(console, args);
+        };
+        console.info = function(...args) {
+          if (args.some(isIgnored)) return;
+          origInfo.apply(console, args);
+        };
+        console.warn = function(...args) {
+          if (args.some(isIgnored)) return;
+          origWarn.apply(console, args);
+        };
+        console.error = function(...args) {
+          if (args.some(isIgnored)) return;
+          origError.apply(console, args);
+        };
+
+        // Also intercept Emscripten stdout/stderr hooks if defined by Module
+        window.Module = window.Module || {};
+        const origPrint = window.Module.print;
+        const origPrintErr = window.Module.printErr;
+        window.Module.print = function(text) {
+          if (isIgnored(text)) return;
+          if (origPrint) origPrint(text);
+        };
+        window.Module.printErr = function(text) {
+          if (isIgnored(text)) return;
+          if (origPrintErr) origPrintErr(text);
+        };
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+

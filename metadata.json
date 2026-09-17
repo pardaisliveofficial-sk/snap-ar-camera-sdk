@@ -1,0 +1,6 @@
+{
+  "name": "SnapStream AR Camera SDK & Lens Studio",
+  "description": "Web AR Camera SDK Prototype and Lens Studio filter authoring platform with real-time face tracking, multi-pass GPU beauty and effects engine, face-anchored AR filters, multi-platform SDK code packages, asset manager, and REST API.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
