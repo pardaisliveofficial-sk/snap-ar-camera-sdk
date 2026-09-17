@@ -500,7 +500,7 @@ export const SnapCameraView: React.FC<SnapCameraProps> = (props) => {
           language: "json",
           content: `{
   "name": "react-native-snap-camera-sdk",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Production React Native Camera SDK powered by GPU shaders & MediaPipe face tracking.",
   "main": "index.js",
   "types": "index.d.ts",
@@ -594,7 +594,7 @@ namespace SnapAR.CameraKit
           content: `{
   "name": "com.snapar.camerakit.unity",
   "displayName": "SnapAR Camera SDK Unity Package",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "unity": "2021.3",
   "description": "SnapAR GPU Camera SDK for Unity with 60 FPS texture binding and AR face mesh."
 }
@@ -615,7 +615,7 @@ namespace SnapAR.CameraKit
           content: `export { sdk, SnapARCameraSDK } from "./cameraSdk";
 export { filterManager } from "./filterManager";
 export { WebGLFilterEngine } from "../utils/webglEngine";
-export { FaceTracker } from "../utils/faceTracker";
+export { FaceTracker } from "../core/tracking/FaceTracker";
 export * from "../types";
 `,
         },
@@ -624,7 +624,7 @@ export * from "../types";
           language: "json",
           content: `{
   "name": "@snapar/camera-sdk",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "description": "Production-grade WebGL camera SDK with 468-point MediaPipe face tracking and GPU beauty shaders.",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -633,7 +633,7 @@ export * from "../types";
     "build": "tsc"
   },
   "dependencies": {
-    "@mediapipe/face_mesh": "^0.4.1633559619"
+    "@mediapipe/tasks-vision": "^1.0.1"
   }
 }
 `,

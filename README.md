@@ -149,3 +149,7 @@ const { blobUrl, durationMs } = await sdk.stopRecording();
 3. **Phase 3**: JNI wrapper for Android (`.aar`) and Swift package / Objective-C bridge for iOS (`.xcframework`).
 4. **Phase 4**: Flutter (`flutter_camera_ar`) and React Native (`react-native-snap-camera`) native modules.
 5. **Phase 5**: Unity Native Plugin with native texture pointer sharing via `IssuePluginEvent`.
+
+
+## Mobile result pass
+The Mobile Camera Test is intentionally beauty-first: the camera is neutral by default, beauty processing runs before optional filters, and AR/lenses are user-selected. See `MOBILE_BEAUTY_RESULT_QA.md`.

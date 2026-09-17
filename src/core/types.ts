@@ -7,6 +7,19 @@ export interface Point3D extends Point2D {
   z: number;
 }
 
+
+export interface GestureStates {
+  isSmiling: boolean;
+  smileConfidence: number;
+  isBlinking: boolean;
+  blinkLeft: boolean;
+  blinkRight: boolean;
+  isMouthOpen: boolean;
+  mouthOpennessRatio: number;
+  isEyebrowRaised: boolean;
+  headPose: { pitch: number; yaw: number; roll: number };
+}
+
 export interface FaceLandmarksData {
   faceDetected: boolean;
   leftEye: Point2D;
@@ -26,6 +39,7 @@ export interface FaceLandmarksData {
   landmarkCount: number;
   confidence: number; // 0.0 to 1.0
   points468?: Point3D[];
+  gestures?: GestureStates;
 }
 
 export interface BeautyConfig {
@@ -36,6 +50,8 @@ export interface BeautyConfig {
   contrast: number; // 50 to 150 (Default 100)
   saturation: number; // 0 to 200 (Default 100)
   sharpness: number; // 0 to 100 (Skin/feature sharpness)
+  noiseReduction?: number; // 0 to 100
+  vibrance?: number; // 0 to 100
   faceSlim: number; // 0 to 100 (Cheek & jawline slim)
   eyeScale: number; // 0 to 100 (Eye enlargement)
   noseSlim: number; // 0 to 100 (Nose width reduction)
@@ -53,6 +69,8 @@ export const DEFAULT_BEAUTY_CONFIG: BeautyConfig = {
   contrast: 100,
   saturation: 100,
   sharpness: 20,
+  noiseReduction: 45,
+  vibrance: 25,
   faceSlim: 25,
   eyeScale: 20,
   noseSlim: 20,

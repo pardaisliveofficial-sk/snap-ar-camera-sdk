@@ -34,7 +34,7 @@ import {
 export default function App() {
   // Application & Active Navigation State - Mobile Test is the default validation surface
   const [activeSection, setActiveSection] = useState<DashboardSection>("mobile_test");
-  const [activeMaskId, setActiveMaskId] = useState<ARMaskId>("cute_puppy");
+  const [activeMaskId, setActiveMaskId] = useState<ARMaskId>("none");
   const [activeBuiltInFilterId, setActiveBuiltInFilterId] = useState<string | null>(null);
   const [beautyParams, setBeautyParams] = useState<BeautyParameters>(DEFAULT_BEAUTY_PARAMS);
 

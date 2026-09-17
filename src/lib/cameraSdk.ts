@@ -1,5 +1,5 @@
 import { filterManager } from "./filterManager";
-import { FaceTracker } from "../utils/faceTracker";
+import { FaceTracker } from "../core/tracking/FaceTracker";
 import { FilterEngine } from "../utils/filterEngine";
 import { webglEngine } from "../utils/webglEngine";
 import { FaceLandmarks, GestureStates, BeautyParameters } from "../types";
@@ -98,7 +98,7 @@ export interface FrameData {
 
 export class SnapARCameraSDK {
   private static instance: SnapARCameraSDK;
-  public static readonly SDK_VERSION = "2.4.0";
+  public static readonly SDK_VERSION = "2.5.0";
 
   private isInitialized = false;
   private isCameraRunning = false;
@@ -254,7 +254,7 @@ export class SnapARCameraSDK {
 
       this.videoElement.srcObject = stream;
       await this.videoElement.play();
-      await this.faceTracker.init(this.videoElement);
+      this.faceTracker.setVideoSource(this.videoElement);
     } catch (e: any) {
       if (e.name === "NotAllowedError" || e.name === "PermissionDeniedError") {
         throw new CameraPermissionError();
@@ -287,7 +287,7 @@ export class SnapARCameraSDK {
         const ctx = this.canvasElement.getContext("2d");
         if (ctx) {
           const landmarks = this.config?.enableFaceTracking
-            ? this.faceTracker.detectNextFrame()
+            ? this.faceTracker.update()
             : ({} as FaceLandmarks);
 
           // Apply Mirror mode transformation if enabled
@@ -437,7 +437,7 @@ export class SnapARCameraSDK {
       processingLatencyMs: Math.round(1000 / (this.currentFps || 60)),
       activeFilterId: this.activeFilterId,
       timestamp: Date.now(),
-      landmarks: this.faceTracker.detectNextFrame(),
+      landmarks: this.faceTracker.update(),
     };
   }
 
@@ -471,14 +471,17 @@ export class SnapARCameraSDK {
     // Test 2: Face Tracking (468 points)
     const t2Start = performance.now();
     try {
-      const landmarks = this.faceTracker.detectNextFrame();
-      const has468Points = landmarks.points468 && landmarks.points468.length === 468;
+      const landmarks = this.faceTracker.update();
+      const denseCount = landmarks.points468?.length || 0;
+      const hasDenseMesh = landmarks.faceDetected && denseCount >= 468;
       results.push({
         module: "Face Tracking",
         testName: "MediaPipe 468-Point Mesh & Gesture Detection",
-        status: has468Points ? "PASSED" : "FAILED",
+        status: hasDenseMesh ? "PASSED" : "FAILED",
         durationMs: Math.round(performance.now() - t2Start),
-        diagnostics: `468 3D landmark points calculated with active gesture evaluation.`,
+        diagnostics: hasDenseMesh
+          ? `${denseCount} real 3D landmark points returned by the active face tracker.`
+          : `No real dense face mesh available yet (received ${denseCount} points).`,
       });
     } catch (e: any) {
       results.push({

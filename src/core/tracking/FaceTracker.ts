@@ -1,4 +1,4 @@
-import { FaceLandmarksData, Point2D, Point3D } from "../types";
+import { FaceLandmarksData, Point2D, Point3D, GestureStates } from "../types";
 import { FilesetResolver, FaceLandmarker } from "@mediapipe/tasks-vision";
 
 export class FaceTracker {
@@ -230,6 +230,37 @@ export class FaceTracker {
     this.videoElement = video;
   }
 
+  private buildGestures(blendshapes: any[] | undefined, mouthOpenness: number, rollAngleRad: number, pitchAngleDeg: number, yawAngleDeg: number): GestureStates {
+    const scores = new Map<string, number>();
+    const categories = blendshapes?.[0]?.categories;
+    if (Array.isArray(categories)) {
+      for (const c of categories) {
+        if (c?.categoryName && typeof c.score === "number") scores.set(c.categoryName, c.score);
+      }
+    }
+    const smileLeft = scores.get("mouthSmileLeft") ?? 0;
+    const smileRight = scores.get("mouthSmileRight") ?? 0;
+    const blinkLeft = scores.get("eyeBlinkLeft") ?? 0;
+    const blinkRight = scores.get("eyeBlinkRight") ?? 0;
+    const jawOpen = scores.get("jawOpen") ?? mouthOpenness;
+    const browLeft = scores.get("browOuterUpLeft") ?? 0;
+    const browRight = scores.get("browOuterUpRight") ?? 0;
+    const smileConfidence = (smileLeft + smileRight) / 2;
+    const blinkLeftState = blinkLeft >= 0.55;
+    const blinkRightState = blinkRight >= 0.55;
+    return {
+      isSmiling: smileConfidence >= 0.55,
+      smileConfidence,
+      isBlinking: blinkLeftState || blinkRightState,
+      blinkLeft: blinkLeftState,
+      blinkRight: blinkRightState,
+      isMouthOpen: jawOpen >= 0.45,
+      mouthOpennessRatio: Math.min(1, Math.max(0, jawOpen)),
+      isEyebrowRaised: ((browLeft + browRight) / 2) >= 0.55,
+      headPose: { pitch: pitchAngleDeg, yaw: yawAngleDeg, roll: rollAngleRad * 180 / Math.PI },
+    };
+  }
+
   /**
    * Process dense landmarks from MediaPipe (478 or 468 points)
    * Extracts essential facial anchor points using exact MediaPipe FaceMesh topology.
@@ -323,6 +354,7 @@ export class FaceTracker {
       landmarkCount: count,
       confidence: conf,
       points468,
+      gestures: this.buildGestures(blendshapes, mouthOpenness, rollAngleRad, pitchAngleDeg, yawAngleDeg),
     };
   }
 
@@ -425,6 +457,7 @@ export class FaceTracker {
               yawAngleDeg: 0,
               landmarkCount: count,
               confidence: 0.9,
+              gestures: this.buildGestures(undefined, 0.1, rollAngleRad, 0, 0),
             };
             this.trackingLandmarkCount = count;
             this.faceDetectionState = "DETECTED";
@@ -499,9 +532,16 @@ export class FaceTracker {
         cx = Math.max(0.2, Math.min(0.8, sumX / skinPixels / sw));
         cy = Math.max(0.2, Math.min(0.8, sumY / skinPixels / sh));
         detected = true;
-      } else {
-        // Fallback default center head anchor
-        detected = true;
+      }
+
+      // Never fabricate a face when no detector produced one. This fallback is only a
+      // low-confidence emergency hint and must not activate AR/beauty on an empty frame.
+      if (!detected) {
+        this.lastLandmarks = this.createEmptyLandmarks();
+        this.faceDetectionState = "NOT DETECTED";
+        this.trackingLandmarkCount = 0;
+        this.trackingConfidence = 0;
+        return;
       }
 
       const hw = 0.35;
@@ -529,10 +569,10 @@ export class FaceTracker {
 
       this.faceDetectionState = "DETECTED";
       this.trackingLandmarkCount = 68;
-      this.trackingConfidence = 0.85;
+      this.trackingConfidence = 0.35;
       if (!this.trackingProvider.includes("Tasks Vision")) {
-        this.trackingProvider = "Optical Skin-Centroid Tracker";
-        this.activeTrackerType = "Optical Realtime Tracker (Fallback)";
+        this.trackingProvider = "Optical Skin-Centroid Tracker (Emergency)";
+        this.activeTrackerType = "Optical Realtime Hint (Low Confidence)";
       }
     } catch (e) {
       this.faceDetectionState = "INITIALIZING";
@@ -603,6 +643,7 @@ export class FaceTracker {
       landmarkCount: target.landmarkCount,
       confidence: target.confidence,
       points468: target.points468,
+      gestures: target.gestures,
     };
   }
 

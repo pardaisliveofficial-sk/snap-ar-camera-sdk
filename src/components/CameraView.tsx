@@ -19,7 +19,7 @@ import {
   BeautyParameters,
   CapturedMedia,
 } from "../types";
-import { FaceTracker } from "../utils/faceTracker";
+import { FaceTracker } from "../core/tracking/FaceTracker";
 import { FilterEngine } from "../utils/filterEngine";
 import { GpuPipeline } from "../core/renderer/GpuPipeline";
 import { BeautyConfig } from "../core/types";
@@ -55,7 +55,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const tempCanvasRef = useRef<HTMLCanvasElement>(document.createElement("canvas"));
 
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
@@ -65,10 +64,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
     setIsFlipped(cameraFacing === "user");
   }, [cameraFacing]);
   const [isFullscreen, setIsFullscreen] = useState(false);
-
-  // Before vs After Split Screen
-  const [showSplit, setShowSplit] = useState(false);
-  const [splitPos, setSplitPos] = useState(0.5);
 
   // Snapshot & Recording State
   const [countdown, setCountdown] = useState<number | null>(null);
@@ -86,7 +81,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const filterEngineRef = useRef<FilterEngine>(new FilterEngine());
   const gpuPipelineRef = useRef<GpuPipeline>(new GpuPipeline());
   const lastTrackingTimeRef = useRef(0);
-  const lastLandmarksRef = useRef(faceTrackerRef.current.detectNextFrame(tempCanvasRef.current));
+  const lastLandmarksRef = useRef(faceTrackerRef.current.getLandmarks());
   const lastRenderTimeRef = useRef(performance.now());
 
   // Performance tracking
@@ -144,8 +139,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
 
-        // Initialize Face Tracker
-        await faceTrackerRef.current.init(videoRef.current);
+        // Use the production Tasks Vision tracker used by the Test Lab/SDK.
+        // Do not fall back to the legacy utility tracker here: it can return
+        // synthetic/low-density landmarks and makes beauty/AR appear detached.
+        faceTrackerRef.current.setVideoSource(videoRef.current);
       }
     } catch (err) {
       console.warn("Camera access failed or user denied permission:", err);
@@ -188,21 +185,26 @@ export const CameraView: React.FC<CameraViewProps> = ({
         const now = performance.now();
         // Face tracking is expensive; keep it around 24-30Hz while the renderer stays smooth.
         if (now - lastTrackingTimeRef.current >= 34) {
-          lastLandmarksRef.current = faceTrackerRef.current.detectNextFrame(tempCanvasRef.current);
+          lastLandmarksRef.current = faceTrackerRef.current.update();
           lastTrackingTimeRef.current = now;
         }
         const landmarks = lastLandmarksRef.current;
 
         const builtIn = getBuiltInFilter();
-        const builtInBoost = builtIn ? Math.min(30, Math.round((builtIn.parameters.smoothing ?? 0) * 0.18)) : 0;
+        const builtInBoost = builtIn ? Math.min(24, Math.round((builtIn.parameters.smoothing ?? 0) * 0.16)) : 0;
+        const filterIntensity = builtIn ? Math.min(100, Math.max(0, builtIn.parameters.intensity ?? 0)) : 0;
+        const colorLift = builtIn ? Math.round((filterIntensity - 50) * 0.035) : 0;
+        const satLift = builtIn ? Math.round((filterIntensity - 50) * 0.08) : 0;
         const beautyConfig: BeautyConfig = {
           smooth: Math.min(100, beautyParams.skinSmoothing + builtInBoost),
-          glow: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.20),
-          tone: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.15),
-          brightness: beautyParams.brightness,
-          contrast: beautyParams.contrast,
-          saturation: beautyParams.saturation,
+          glow: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.22),
+          tone: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.16),
+          brightness: Math.max(85, Math.min(120, beautyParams.brightness + colorLift)),
+          contrast: Math.max(90, Math.min(115, beautyParams.contrast + colorLift * 0.5)),
+          saturation: Math.max(85, Math.min(125, beautyParams.saturation + satLift)),
           sharpness: beautyParams.sharpening,
+          noiseReduction: beautyParams.noiseReduction,
+          vibrance: beautyParams.vibrance,
           faceSlim: beautyParams.faceSlimming,
           eyeScale: beautyParams.eyeEnlargement,
           noseSlim: beautyParams.noseSlimming,
@@ -436,12 +438,20 @@ export const CameraView: React.FC<CameraViewProps> = ({
       if (face) {
         const lx=landmarks.leftEye.x*width, ly=landmarks.leftEye.y*height, rx=landmarks.rightEye.x*width, ry=landmarks.rightEye.y*height;
         const r=fw*.17; ctx.strokeStyle=c1; ctx.lineWidth=Math.max(3,fw*.025); ctx.globalAlpha=.92;
-        ctx.beginPath(); ctx.ellipse(lx,ly,r,r*.58,0,0,Math.PI*2); ctx.ellipse(rx,ry,r,r*.58,0,0,Math.PI*2); ctx.moveTo(lx+r,ly); ctx.lineTo(rx-r,ry); ctx.stroke();
+        ctx.translate((lx+rx)*0.5,(ly+ry)*0.5);
+        ctx.rotate(Math.atan2(ry-ly,rx-lx));
+        const gap=Math.max(r*0.15,fw*.018);
+        ctx.beginPath(); ctx.ellipse(-(r+gap),0,r,r*.58,0,0,Math.PI*2); ctx.ellipse(r+gap,0,r,r*.58,0,0,Math.PI*2); ctx.moveTo(-gap,0); ctx.lineTo(gap,0); ctx.stroke();
       }
     } else if (["Hats","Hair","Seasonal","Festival"].includes(category)) {
       if (face) { ctx.strokeStyle=c1; ctx.fillStyle=`rgba(${a[0]},${a[1]},${a[2]},.18)`; ctx.lineWidth=Math.max(3,fw*.03); ctx.beginPath(); ctx.arc(fx,fy-fh*.58,fw*.62,Math.PI,Math.PI*2); ctx.stroke(); ctx.beginPath(); ctx.ellipse(fx,fy-fh*.57,fw*.68,fh*.08,0,0,Math.PI*2); ctx.fill(); }
     } else if (category === "Cute Animals") {
-      if (face) { ctx.fillStyle=`rgba(${a[0]},${a[1]},${a[2]},.78)`; ctx.beginPath(); ctx.ellipse(fx-fw*.47,fy-fh*.48,fw*.22,fh*.30,-.25,0,Math.PI*2); ctx.ellipse(fx+fw*.47,fy-fh*.48,fw*.22,fh*.30,.25,0,Math.PI*2); ctx.fill(); ctx.fillStyle=c2; ctx.beginPath(); ctx.ellipse(fx,fy+fh*.02,fw*.10,fh*.07,0,0,Math.PI*2); ctx.fill(); }
+      if (face) {
+        ctx.translate(fx,fy); ctx.rotate(Math.atan2(landmarks.rightEye.y-landmarks.leftEye.y, landmarks.rightEye.x-landmarks.leftEye.x));
+        ctx.fillStyle=`rgba(${a[0]},${a[1]},${a[2]},.68)`;
+        ctx.beginPath(); ctx.ellipse(-fw*.40,-fh*.48,fw*.15,fh*.23,-.12,0,Math.PI*2); ctx.ellipse(fw*.40,-fh*.48,fw*.15,fh*.23,.12,0,Math.PI*2); ctx.fill();
+        ctx.fillStyle=c2; ctx.beginPath(); ctx.ellipse(0,fh*.02,fw*.075,fh*.055,0,0,Math.PI*2); ctx.fill();
+      }
     } else if (["Neon","Cyberpunk"].includes(category)) {
       if (face) { ctx.globalAlpha=.72; ctx.strokeStyle=c1; ctx.lineWidth=Math.max(2,fw*.012); ctx.beginPath(); ctx.ellipse(fx,fy-fh*.03,fw*.53,fh*.52,0,0,Math.PI*2); ctx.stroke(); glow(fx,fy,fw*.8,.10); }
     } else if (["Golden Hour","Vintage","Retro Film","Black & White","HDR","Blur","Bokeh"].includes(category)) {
@@ -514,19 +524,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
           {/* Top Right Controls */}
           <div className="pointer-events-auto flex items-center gap-2">
-            {/* Split Screen Before/After Toggle */}
-            <button
-              onClick={() => setShowSplit(!showSplit)}
-              className={`px-3 py-1.5 rounded-xl text-xs font-semibold backdrop-blur-md flex items-center gap-1.5 border transition-all ${
-                showSplit
-                  ? "bg-pink-600 text-white border-pink-400 shadow-lg shadow-pink-600/30"
-                  : "bg-slate-900/80 text-slate-300 border-slate-700 hover:bg-slate-800"
-              }`}
-            >
-              <SlidersHorizontal className="w-3.5 h-3.5 text-pink-400" />
-              <span>{showSplit ? "Raw vs AR Split ON" : "Compare Before/After"}</span>
-            </button>
-
             {/* Flip Horizontal */}
             <button
               onClick={() => setIsFlipped(!isFlipped)}

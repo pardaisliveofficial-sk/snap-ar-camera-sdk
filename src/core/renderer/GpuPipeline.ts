@@ -4,6 +4,9 @@ export class GpuPipeline {
   private canvas: HTMLCanvasElement;
   private gl: WebGLRenderingContext | WebGL2RenderingContext | null = null;
   private cameraTexture: WebGLTexture | null = null;
+  private skinMaskTexture: WebGLTexture | null = null;
+  private skinMaskCanvas: HTMLCanvasElement;
+  private skinMaskCtx: CanvasRenderingContext2D | null = null;
   private quadBuffer: WebGLBuffer | null = null;
   private cameraQuadBuffer: WebGLBuffer | null = null;
   private fboQuadBuffer: WebGLBuffer | null = null;
@@ -23,6 +26,10 @@ export class GpuPipeline {
     this.canvas = document.createElement("canvas");
     this.canvas.width = 1280;
     this.canvas.height = 720;
+    this.skinMaskCanvas = document.createElement("canvas");
+    this.skinMaskCanvas.width = 256;
+    this.skinMaskCanvas.height = 256;
+    this.skinMaskCtx = this.skinMaskCanvas.getContext("2d", { willReadFrequently: false });
     this.initWebGL();
   }
 
@@ -95,6 +102,17 @@ export class GpuPipeline {
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
       gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
+      // Low-resolution face/skin mask. It is generated from the same 478-point
+      // tracker and sampled by the beauty shader; this prevents smoothing from
+      // spilling into hair, beard, eyes and lips.
+      this.skinMaskTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, this.skinMaskTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 256, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+
       this.buildShaders();
       this.isSupported = true;
     } catch (err) {
@@ -134,6 +152,7 @@ export class GpuPipeline {
       precision mediump float;
       varying vec2 v_texCoord;
       uniform sampler2D u_image;
+      uniform sampler2D u_skinMask;
       uniform vec2 u_resolution;
       uniform float u_smooth;
       uniform float u_glow;
@@ -149,6 +168,8 @@ export class GpuPipeline {
       uniform float u_lips;
       uniform float u_teeth;
       uniform float u_eyeBright;
+      uniform float u_noiseReduction;
+      uniform float u_vibrance;
       uniform int u_faceDetected;
       uniform vec2 u_leftEye;
       uniform vec2 u_rightEye;
@@ -179,11 +200,11 @@ export class GpuPipeline {
           float dr = distance(uv, u_rightEye);
           if (dl < r) {
             float w = pow(1.0 - smoothstep(0.0, r, dl), 2.0);
-            outUv = mix(outUv, u_leftEye + (outUv - u_leftEye) * (1.0 - s), w);
+            outUv = mix(outUv, u_leftEye + (outUv - u_leftEye) * (1.0 + s), w);
           }
           if (dr < r) {
             float w = pow(1.0 - smoothstep(0.0, r, dr), 2.0);
-            outUv = mix(outUv, u_rightEye + (outUv - u_rightEye) * (1.0 - s), w);
+            outUv = mix(outUv, u_rightEye + (outUv - u_rightEye) * (1.0 + s), w);
           }
         }
 
@@ -197,7 +218,7 @@ export class GpuPipeline {
           float nx = abs(dx) / halfW;
           float xw = 1.0 - smoothstep(0.35, 1.0, nx);
           float shift = (u_faceSlim / 100.0) * 0.035 * yw * xw;
-          outUv.x += dx < 0.0 ? shift : -shift;
+          outUv.x += dx < 0.0 ? -shift : shift;
         }
 
         if (u_noseSlim > 0.0) {
@@ -208,7 +229,7 @@ export class GpuPipeline {
           if (q < 1.0) {
             float w = 1.0 - smoothstep(0.0, 1.0, q);
             float pinch = (u_noseSlim / 100.0) * 0.018 * w;
-            outUv.x += d.x < 0.0 ? pinch : -pinch;
+            outUv.x += d.x < 0.0 ? -pinch : pinch;
           }
         }
 
@@ -217,7 +238,7 @@ export class GpuPipeline {
           float d = distance(uv, u_chin);
           if (d < r) {
             float w = 1.0 - smoothstep(0.0, r, d);
-            outUv.y -= (u_jaw / 100.0) * 0.018 * w;
+            outUv.y += (u_jaw / 100.0) * 0.018 * w;
           }
         }
         return clamp(outUv, 0.0, 1.0);
@@ -239,10 +260,15 @@ export class GpuPipeline {
           float Y = dot(color, vec3(0.299, 0.587, 0.114));
           float Cb = dot(color, vec3(-0.168736, -0.331264, 0.5)) + 0.5;
           float Cr = dot(color, vec3(0.5, -0.418688, -0.081312)) + 0.5;
-          float cb = 1.0 - smoothstep(0.20, 0.62, Cb);
-          float cr = smoothstep(0.34, 0.43, Cr) * (1.0 - smoothstep(0.76, 0.84, Cr));
-          float luminanceGate = smoothstep(0.10, 0.75, Y);
+          // Broad YCbCr skin classifier. The tracked face mask is the primary
+          // geometry constraint; chroma only decides which face pixels are skin.
+          // Unlike the previous max(chroma, 0.62) fallback, this does not blur
+          // beard/hair simply because they sit inside the face oval.
+          float cb = 1.0 - smoothstep(0.18, 0.66, Cb);
+          float cr = smoothstep(0.32, 0.40, Cr) * (1.0 - smoothstep(0.74, 0.82, Cr));
+          float luminanceGate = smoothstep(0.035, 0.72, Y);
           float chromaSkin = clamp(cb * cr * luminanceGate, 0.0, 1.0);
+          float trackedSkin = texture2D(u_skinMask, uv).r;
 
           float eyeR = max(distance(u_leftEye, u_rightEye) * 0.15, 0.035);
           float eyeCut = max(ellipseMask(uv, u_leftEye, vec2(eyeR * 1.5, eyeR)),
@@ -250,35 +276,50 @@ export class GpuPipeline {
           float mouthCut = ellipseMask(uv, u_mouthCenter, vec2(radius.x * 0.38, radius.y * 0.18));
           float browCut = max(ellipseMask(uv, u_leftEye + vec2(0.0, -radius.y * 0.18), vec2(eyeR * 1.7, eyeR * 0.65)),
                               ellipseMask(uv, u_rightEye + vec2(0.0, -radius.y * 0.18), vec2(eyeR * 1.7, eyeR * 0.65)));
-          skinMask = faceMask * max(chromaSkin, 0.32) * (1.0 - eyeCut * 0.90) * (1.0 - mouthCut * 0.75) * (1.0 - browCut * 0.65);
+          // The face ellipse is only a fallback support mask; chroma + facial
+          // feature exclusions keep the enhancement on skin and off hair/eyes/lips.
+          float geometryMask = max(faceMask, trackedSkin);
+          skinMask = geometryMask * (0.18 + 0.82 * chromaSkin) * (1.0 - eyeCut * 0.98) * (1.0 - mouthCut * 0.94) * (1.0 - browCut * 0.90);
+          skinMask = smoothstep(0.05, 0.32, skinMask);
         }
 
-        // Gentle bilateral-like smoothing: 9 taps, weighted by color similarity.
+        // Stage 2 skin retouch: stronger multi-radius edge-aware smoothing.
         if (u_smooth > 0.0 && skinMask > 0.01) {
-          vec2 px = 1.5 / u_resolution;
-          vec3 sum = color * 1.5;
-          float total = 1.5;
-          for (int i = 0; i < 8; i++) {
-            float a = 0.785398 * float(i);
-            vec2 off = vec2(cos(a), sin(a)) * px * 2.0;
-            vec3 s = texture2D(u_image, uv + off).rgb;
-            float cw = exp(-distance(s, color) * 12.0);
-            sum += s * cw;
+          vec2 px = 1.0 / u_resolution;
+          vec3 sum = color * 3.0;
+          float total = 3.0;
+          for (int i = 0; i < 12; i++) {
+            float a = 0.523599 * float(i);
+            float radius = (i < 6 ? 2.0 : 4.0);
+            vec2 off = vec2(cos(a), sin(a)) * px * radius;
+            vec3 sampleColor = texture2D(u_image, uv + off).rgb;
+            float colorDistance = distance(sampleColor, color);
+            float cw = exp(-colorDistance * 16.0);
+            sum += sampleColor * cw;
             total += cw;
           }
           vec3 smooth = sum / total;
-          color = mix(color, smooth, (u_smooth / 100.0) * skinMask * 0.82);
+          float level = smoothstep(0.0, 1.0, u_smooth / 100.0);
+          float strength = level * skinMask * (0.62 + 0.30 * level);
+          color = mix(color, smooth, strength);
+          vec3 localDetail = color - smooth;
+          float detailKeep = 0.24 + (u_sharpness / 100.0) * 0.30;
+          color += localDetail * detailKeep * skinMask;
+          if (u_noiseReduction > 0.0) {
+            float denoise = (u_noiseReduction / 100.0) * skinMask * 0.28;
+            color = mix(color, smooth, denoise);
+          }
         }
 
         if (u_tone > 0.0 && skinMask > 0.01) {
-          vec3 healthy = color * vec3(1.035, 1.005, 0.985) + vec3(0.012, 0.006, 0.004);
-          color = mix(color, healthy, (u_tone / 100.0) * skinMask * 0.55);
+          vec3 healthy = color * vec3(1.035, 1.012, 0.992) + vec3(0.010, 0.006, 0.004);
+          color = mix(color, healthy, (u_tone / 100.0) * skinMask * 0.96);
         }
 
         if (u_glow > 0.0 && skinMask > 0.01) {
           float lum = dot(color, vec3(0.299, 0.587, 0.114));
           float hi = smoothstep(0.38, 0.82, lum);
-          color += vec3(1.0, 0.91, 0.88) * hi * (u_glow / 100.0) * skinMask * 0.12;
+          color += vec3(1.0, 0.975, 0.95) * hi * (u_glow / 100.0) * skinMask * 0.34;
         }
 
         if (u_eyeBright > 0.0 && u_faceDetected == 1) {
@@ -303,10 +344,27 @@ export class GpuPipeline {
           if (lum > 0.30) color = mix(color, vec3(max(lum, 0.72)), tooth * (u_teeth / 100.0) * 0.55);
         }
 
+        // Camera enhancement pass. Native social cameras usually add a small
+        // computational-photography lift before beauty: recover shadows, open
+        // midtones and roll off highlights. This is global and remains subtle.
+        float sceneLum = dot(color, vec3(0.299, 0.587, 0.114));
+        float shadowLift = (1.0 - smoothstep(0.10, 0.56, sceneLum)) * 0.105;
+        float midLift = smoothstep(0.18, 0.48, sceneLum) * (1.0 - smoothstep(0.52, 0.86, sceneLum)) * 0.026;
+        color += shadowLift + midLift;
+
         float contrast = max(u_contrast / 100.0, 0.01);
         float brightness = (u_brightness - 100.0) / 100.0;
         color = (color - 0.5) * contrast + 0.5 + brightness;
+        // Gentle highlight compression prevents bright skin from clipping after
+        // enhancement, which is especially useful on inexpensive phone cameras.
+        float postLum = dot(color, vec3(0.299, 0.587, 0.114));
+        float hiCompress = smoothstep(0.72, 1.0, postLum) * 0.16;
+        color = mix(color, color / max(1.0 + hiCompress, 0.001), hiCompress);
+
         float gray = dot(color, vec3(0.299, 0.587, 0.114));
+        float vib = max(u_vibrance / 100.0, 0.0);
+        float chroma = max(max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b)), 0.0);
+        color += (color - vec3(gray)) * vib * (1.0 - chroma) * 0.18;
         color = mix(vec3(gray), color, max(u_saturation / 100.0, 0.0));
 
         if (u_sharpness > 0.0) {
@@ -670,6 +728,49 @@ export class GpuPipeline {
     }
   }
 
+  private updateSkinMask(landmarks: FaceLandmarksData): void {
+    if (!this.gl || !this.skinMaskTexture || !this.skinMaskCtx) return;
+    const ctx = this.skinMaskCtx;
+    const size = 256;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, size, size);
+    if (!landmarks.faceDetected || !landmarks.points468 || landmarks.points468.length < 200) return;
+
+    // MediaPipe face-oval contour, ordered around the visible face boundary.
+    const oval = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109];
+    ctx.beginPath();
+    oval.forEach((idx, i) => {
+      const p = landmarks.points468![idx];
+      if (!p) return;
+      const x = p.x * size;
+      const y = p.y * size;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.closePath();
+    ctx.fillStyle = "rgba(255,255,255,1)";
+    ctx.fill();
+
+    // Cut out features that must remain crisp.
+    ctx.globalCompositeOperation = "destination-out";
+    const cutEllipse = (cx: number, cy: number, rx: number, ry: number) => {
+      ctx.beginPath();
+      ctx.ellipse(cx * size, cy * size, rx * size, ry * size, 0, 0, Math.PI * 2);
+      ctx.fill();
+    };
+    const eyeDistance = Math.max(Math.hypot(landmarks.rightEye.x - landmarks.leftEye.x, landmarks.rightEye.y - landmarks.leftEye.y), 0.05);
+    cutEllipse(landmarks.leftEye.x, landmarks.leftEye.y, eyeDistance * 0.18, eyeDistance * 0.10);
+    cutEllipse(landmarks.rightEye.x, landmarks.rightEye.y, eyeDistance * 0.18, eyeDistance * 0.10);
+    cutEllipse(landmarks.mouthCenter.x, landmarks.mouthCenter.y, eyeDistance * 0.34, eyeDistance * 0.16);
+    // A small nostril/bridge exclusion avoids smoothing the most detailed nose pixels.
+    cutEllipse(landmarks.noseTip.x, landmarks.noseTip.y, eyeDistance * 0.14, eyeDistance * 0.12);
+    ctx.globalCompositeOperation = "source-over";
+
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.skinMaskTexture);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.skinMaskCanvas);
+  }
+
   private setBeautyUniforms(
     prog: WebGLProgram,
     w: number,
@@ -682,6 +783,13 @@ export class GpuPipeline {
 
     const uRes = gl.getUniformLocation(prog, "u_resolution");
     if (uRes) gl.uniform2f(uRes, w, h);
+    const uSkinMask = gl.getUniformLocation(prog, "u_skinMask");
+    if (uSkinMask) {
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.skinMaskTexture);
+      gl.uniform1i(uSkinMask, 1);
+      gl.activeTexture(gl.TEXTURE0);
+    }
 
     const setFloat = (name: string, val: number) => {
       const loc = gl.getUniformLocation(prog, name);
@@ -702,6 +810,8 @@ export class GpuPipeline {
     setFloat("u_lips", beauty.lips);
     setFloat("u_teeth", beauty.teeth);
     setFloat("u_eyeBright", beauty.eyeBright ?? 0);
+    setFloat("u_noiseReduction", beauty.noiseReduction ?? 0);
+    setFloat("u_vibrance", beauty.vibrance ?? 0);
 
     const locFace = gl.getUniformLocation(prog, "u_faceDetected");
     if (locFace) gl.uniform1i(locFace, landmarks.faceDetected ? 1 : 0);
@@ -766,6 +876,10 @@ export class GpuPipeline {
     // Upload camera frame to GPU input texture
     gl.bindTexture(gl.TEXTURE_2D, this.cameraTexture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+
+    if (beautyEnabled && landmarks.faceDetected) {
+      this.updateSkinMask(landmarks);
+    }
 
     // Determine active pipeline stages based on comparison mode
     const isBeautyMode =
@@ -933,6 +1047,10 @@ export class GpuPipeline {
       if (this.cameraTexture) {
         this.gl.deleteTexture(this.cameraTexture);
         this.cameraTexture = null;
+      }
+      if (this.skinMaskTexture) {
+        this.gl.deleteTexture(this.skinMaskTexture);
+        this.skinMaskTexture = null;
       }
       if (this.quadBuffer) {
         this.gl.deleteBuffer(this.quadBuffer);

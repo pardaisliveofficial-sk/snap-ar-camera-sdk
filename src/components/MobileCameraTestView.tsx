@@ -59,10 +59,16 @@ export const MobileCameraTestView: React.FC<Props> = ({
   }, [category, query]);
 
   const selectBuiltIn = (id: string) => {
+    const selected = BUILT_IN_FILTERS.find(f => f.id === id);
     filterManager.applyFilter(id);
     onSelectBuiltInFilter(id);
+
+    // Filter selection is explicit. Never auto-enable a beauty/AR effect when
+    // the camera starts; the user must tap a filter. The selected lens may later
+    // contribute its own authored beauty parameters through the same engine.
+
     setLoadedId(id);
-    setTimeout(() => setLoadedId(null), 1300);
+    setTimeout(() => setLoadedId(null), 900);
   };
 
   return (
@@ -90,7 +96,7 @@ export const MobileCameraTestView: React.FC<Props> = ({
         </div>
       </div>
 
-      {loadedId && <div className="absolute top-[calc(env(safe-area-inset-top)+66px)] left-1/2 -translate-x-1/2 z-[145] px-4 py-2 rounded-full bg-black/65 backdrop-blur-xl border border-emerald-400/30 text-[10px] font-bold flex items-center gap-2"><Download className="w-3.5 h-3.5 text-emerald-300" /> FILTER LOADED & APPLIED</div>}
+      {loadedId && <div className="absolute top-[calc(env(safe-area-inset-top)+66px)] left-1/2 -translate-x-1/2 z-[145] px-4 py-2 rounded-full bg-black/65 backdrop-blur-xl border border-emerald-400/30 text-[10px] font-bold flex items-center gap-2"><Download className="w-3.5 h-3.5 text-emerald-300" /> FILTER APPLIED</div>}
 
       {showPanel && <div className="absolute inset-x-0 bottom-0 z-[130] pb-[calc(env(safe-area-inset-bottom)+8px)] pointer-events-auto">
         <div className="mx-2 rounded-[28px] bg-black/82 backdrop-blur-2xl border border-white/12 shadow-2xl overflow-hidden">
