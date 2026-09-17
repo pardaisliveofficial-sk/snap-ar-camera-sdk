@@ -111,7 +111,7 @@ export const AR_MASKS: ARMaskDefinition[] = [
 ];
 
 export const DEFAULT_BEAUTY_PARAMS: BeautyParameters = {
-  skinSmoothing: 62,
+  skinSmoothing: 72,
   skinToneGlow: 0,
   eyeEnlargement: 0,
   eyeBrightening: 6,

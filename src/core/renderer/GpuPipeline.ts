@@ -315,7 +315,7 @@ export class GpuPipeline {
           }
           vec3 smooth = sum / total;
           float level = smoothstep(0.0, 1.0, u_smooth / 100.0);
-          float strength = level * skinMask * (0.48 + 0.16 * level);
+          float strength = level * skinMask * (0.62 + 0.18 * level);
           color = mix(color, smooth, strength);
           vec3 localDetail = color - smooth;
           float detailKeep = 0.28 + (u_sharpness / 100.0) * 0.24;
@@ -814,7 +814,7 @@ export class GpuPipeline {
       const broadSkin = this.smoothstepCPU(105, 88, c.cb) * this.smoothstepCPU(118, 138, c.cr) * this.smoothstepCPU(-2, 18, c.cr-c.cb);
       const relativeLuma = this.smoothstepCPU(Math.max(8, sy*0.38), Math.max(20, sy*0.58), c.y)
         * (1-this.smoothstepCPU(Math.min(245, sy*1.55), Math.min(255, sy*1.85), c.y));
-      const p=Math.min(1, (colorMatch*0.82 + broadSkin*0.18) * relativeLuma * (0.35 + geo*0.65));
+      const p=Math.min(1, (colorMatch*0.92 + broadSkin*0.08) * relativeLuma * (0.22 + geo*0.78));
       out[i+3]=Math.round(p*255);
       out[i]=255;out[i+1]=255;out[i+2]=255;
     }
@@ -897,10 +897,9 @@ export class GpuPipeline {
     const setVec2 = (name: string, p: { x: number; y: number }) => {
       const loc = gl.getUniformLocation(prog, name);
       if (loc) {
-        // Camera texture coordinates are vertically flipped relative to
-        // FaceLandmarker/video coordinates. Keep every facial anchor in the
-        // same coordinate space as the sampled camera image.
-        gl.uniform2f(loc, p.x, 1 - p.y);
+        // Camera texture coordinates already use the same normalized top-left
+        // coordinate space as FaceLandmarker/video coordinates. Do not flip Y.
+        gl.uniform2f(loc, p.x, p.y);
       }
     };
 

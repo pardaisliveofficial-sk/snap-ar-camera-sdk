@@ -43,61 +43,12 @@ export class FilterEngine {
     // Clear canvas
     ctx.clearRect(0, 0, width, height);
 
-    // Save context for raw side if before/after split is active
-    if (showBeforeAfterSplit) {
-      const splitX = width * splitPosition;
+    // Production camera output is always a single continuous frame.
+    // The legacy before/after split renderer is intentionally disabled so no
+    // hard divider, half-frame shading, or comparison overlay can leak into
+    // SDK/camera output. Comparison belongs in the dedicated Test Lab only.
+    this.renderFilteredVideoFrame(ctx, video, width, height, beauty, maskId, landmarks, dt);
 
-      // Draw Raw video on left side
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(0, 0, splitX, height);
-      ctx.clip();
-      ctx.drawImage(video, 0, 0, width, height);
-
-      // Raw Label
-      ctx.fillStyle = "rgba(0, 0, 0, 0.6)";
-      ctx.fillRect(10, 10, 80, 26);
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "bold 12px sans-serif";
-      ctx.fillText("RAW CAM", 18, 27);
-      ctx.restore();
-
-      // Draw Enhanced side on right
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(splitX, 0, width - splitX, height);
-      ctx.clip();
-
-      this.renderFilteredVideoFrame(ctx, video, width, height, beauty, maskId, landmarks, dt);
-
-      // Enhanced Label
-      ctx.fillStyle = "rgba(236, 72, 153, 0.8)";
-      ctx.fillRect(splitX + 10, 10, 110, 26);
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "bold 12px sans-serif";
-      ctx.fillText("ENHANCED AR", splitX + 18, 27);
-      ctx.restore();
-
-      // Split Divider Line
-      ctx.strokeStyle = "#ec4899";
-      ctx.lineWidth = 3;
-      ctx.beginPath();
-      ctx.moveTo(splitX, 0);
-      ctx.lineTo(splitX, height);
-      ctx.stroke();
-
-      // Split Handle Circle
-      ctx.fillStyle = "#ec4899";
-      ctx.beginPath();
-      ctx.arc(splitX, height / 2, 12, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = "#ffffff";
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    } else {
-      // Render full enhanced frame
-      this.renderFilteredVideoFrame(ctx, video, width, height, beauty, maskId, landmarks, dt);
-    }
   }
 
   private renderFilteredVideoFrame(
