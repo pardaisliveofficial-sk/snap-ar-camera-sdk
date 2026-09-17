@@ -35,6 +35,7 @@ export default function App() {
   // Application & Active Navigation State - Mobile Test is the default validation surface
   const [activeSection, setActiveSection] = useState<DashboardSection>("mobile_test");
   const [activeMaskId, setActiveMaskId] = useState<ARMaskId>("cute_puppy");
+  const [activeBuiltInFilterId, setActiveBuiltInFilterId] = useState<string | null>(null);
   const [beautyParams, setBeautyParams] = useState<BeautyParameters>(DEFAULT_BEAUTY_PARAMS);
 
   // Camera Hardware State
@@ -95,12 +96,14 @@ export default function App() {
     return (
       <MobileCameraTestView
         activeMaskId={activeMaskId}
-        onSelectMask={setActiveMaskId}
+        onSelectMask={(id) => { setActiveMaskId(id); setActiveBuiltInFilterId(null); }}
+        onSelectBuiltInFilter={(id) => { setActiveBuiltInFilterId(id); setActiveMaskId("none"); }}
         beautyParams={beautyParams}
         onChangeBeauty={setBeautyParams}
         cameraFacing={cameraFacing}
         onToggleCameraFacing={() => setCameraFacing((prev) => (prev === "user" ? "environment" : "user"))}
         onCapture={handleCapture}
+        activeBuiltInFilterId={activeBuiltInFilterId}
         onExit={() => setActiveSection("test_lab")}
       />
     );

@@ -135,8 +135,6 @@ export class GpuPipeline {
       varying vec2 v_texCoord;
       uniform sampler2D u_image;
       uniform vec2 u_resolution;
-
-      // Beauty Controls (0 to 100)
       uniform float u_smooth;
       uniform float u_glow;
       uniform float u_tone;
@@ -150,8 +148,7 @@ export class GpuPipeline {
       uniform float u_jaw;
       uniform float u_lips;
       uniform float u_teeth;
-
-      // Face Landmarks & Tracking
+      uniform float u_eyeBright;
       uniform int u_faceDetected;
       uniform vec2 u_leftEye;
       uniform vec2 u_rightEye;
@@ -163,258 +160,166 @@ export class GpuPipeline {
       uniform vec2 u_chin;
       uniform float u_mouthOpen;
 
-      // Local Geometric Mesh Warp (Background Remains 100% Stable)
-      vec2 getDeformedUV(vec2 uv) {
+      float ellipseMask(vec2 uv, vec2 center, vec2 radius) {
+        vec2 d = (uv - center) / radius;
+        float q = dot(d, d);
+        return 1.0 - smoothstep(0.70, 1.05, q);
+      }
+
+      vec2 warpFace(vec2 uv) {
         if (u_faceDetected == 0) return uv;
-        vec2 warpedUV = uv;
+        vec2 outUv = uv;
+        float faceW = max(distance(u_leftCheek, u_rightCheek), 0.20);
+        float faceH = max(distance(u_forehead, u_chin), 0.30);
 
-        // 1. Eye Enlargement (Localized spherical zoom strictly in eye orbit)
         if (u_eyeScale > 0.0) {
-          float eyeSpan = distance(u_leftEye, u_rightEye);
-          float maxEyeRadius = min(eyeSpan * 0.35, 0.11);
-          float strength = (u_eyeScale / 100.0) * 0.32;
-
-          float dL = distance(uv, u_leftEye);
-          if (dL < maxEyeRadius) {
-            float f = smoothstep(maxEyeRadius, 0.0, dL);
-            warpedUV = u_leftEye + (warpedUV - u_leftEye) * (1.0 - strength * f * f);
+          float r = max(faceW * 0.16, 0.045);
+          float s = (u_eyeScale / 100.0) * 0.24;
+          float dl = distance(uv, u_leftEye);
+          float dr = distance(uv, u_rightEye);
+          if (dl < r) {
+            float w = pow(1.0 - smoothstep(0.0, r, dl), 2.0);
+            outUv = mix(outUv, u_leftEye + (outUv - u_leftEye) * (1.0 - s), w);
           }
-
-          float dR = distance(uv, u_rightEye);
-          if (dR < maxEyeRadius) {
-            float f = smoothstep(maxEyeRadius, 0.0, dR);
-            warpedUV = u_rightEye + (warpedUV - u_rightEye) * (1.0 - strength * f * f);
+          if (dr < r) {
+            float w = pow(1.0 - smoothstep(0.0, r, dr), 2.0);
+            outUv = mix(outUv, u_rightEye + (outUv - u_rightEye) * (1.0 - s), w);
           }
         }
 
-        // 2. Face Slimming (Narrows lower cheeks inward while background remains completely stable)
         if (u_faceSlim > 0.0) {
-          float eyeY = (u_leftEye.y + u_rightEye.y) * 0.5;
-          float chinY = u_chin.y;
-          float ySpan = max(chinY - eyeY, 0.02);
-          float yProgress = (uv.y - eyeY) / ySpan;
-
-          // Only warp lower cheek band between eye level and chin level
-          if (yProgress > 0.1 && yProgress < 1.05) {
-            float yWeight = sin(yProgress * 3.14159);
-            float faceHalfW = max(distance(u_leftCheek, u_rightCheek) * 0.5, 0.08);
-            float xDiff = uv.x - u_noseTip.x;
-            float normX = abs(xDiff) / faceHalfW;
-
-            // Strict Hermite window: active within cheeks, tapers to zero at face edge so background is untouched
-            if (normX > 0.18 && normX < 1.0) {
-              float xWeight = smoothstep(0.18, 0.5, normX) * (1.0 - smoothstep(0.75, 1.0, normX));
-              float shift = (u_faceSlim / 100.0) * 0.04 * faceHalfW * yWeight * xWeight;
-              if (xDiff < 0.0) {
-                warpedUV.x -= shift;
-              } else {
-                warpedUV.x += shift;
-              }
-            }
-          }
+          float y0 = (u_leftEye.y + u_rightEye.y) * 0.5;
+          float y1 = u_chin.y;
+          float yp = clamp((uv.y - y0) / max(y1 - y0, 0.20), 0.0, 1.0);
+          float yw = sin(yp * 3.1415926);
+          float halfW = max(faceW * 0.52, 0.12);
+          float dx = uv.x - u_noseTip.x;
+          float nx = abs(dx) / halfW;
+          float xw = 1.0 - smoothstep(0.35, 1.0, nx);
+          float shift = (u_faceSlim / 100.0) * 0.035 * yw * xw;
+          outUv.x += dx < 0.0 ? shift : -shift;
         }
 
-        // 3. Nose Slimming (Pinches nose bridge & tip horizontally, background untouched)
         if (u_noseSlim > 0.0) {
-          vec2 noseDiff = uv - u_noseTip;
-          float rx = max(distance(u_leftCheek, u_rightCheek) * 0.14, 0.04);
-          float ry = max(distance(u_forehead, u_chin) * 0.16, 0.05);
-          float dNose = length(vec2(noseDiff.x / rx, noseDiff.y / ry));
-          if (dNose < 1.0) {
-            float w = (1.0 - dNose * dNose);
-            float pinch = (u_noseSlim / 100.0) * 0.022 * rx * w;
-            if (noseDiff.x < 0.0) {
-              warpedUV.x -= pinch;
-            } else {
-              warpedUV.x += pinch;
-            }
+          vec2 d = uv - u_noseTip;
+          float rx = max(faceW * 0.105, 0.025);
+          float ry = max(faceH * 0.15, 0.045);
+          float q = dot(vec2(d.x / rx, d.y / ry), vec2(d.x / rx, d.y / ry));
+          if (q < 1.0) {
+            float w = 1.0 - smoothstep(0.0, 1.0, q);
+            float pinch = (u_noseSlim / 100.0) * 0.018 * w;
+            outUv.x += d.x < 0.0 ? pinch : -pinch;
           }
         }
 
-        // 4. Jaw Shaping
         if (u_jaw > 0.0) {
-          float dChin = distance(uv, u_chin);
-          float jawR = max(distance(u_forehead, u_chin) * 0.22, 0.06);
-          if (dChin < jawR) {
-            float w = smoothstep(jawR, 0.0, dChin);
-            warpedUV.y -= (u_jaw / 100.0) * 0.035 * jawR * w;
+          float r = max(faceW * 0.28, 0.07);
+          float d = distance(uv, u_chin);
+          if (d < r) {
+            float w = 1.0 - smoothstep(0.0, r, d);
+            outUv.y -= (u_jaw / 100.0) * 0.018 * w;
           }
         }
-
-        return clamp(warpedUV, 0.0, 1.0);
+        return clamp(outUv, 0.0, 1.0);
       }
 
       void main() {
-        vec2 uv = getDeformedUV(v_texCoord);
-        vec4 baseColor = texture2D(u_image, uv);
-        vec3 color = baseColor.rgb;
+        vec2 uv = warpFace(v_texCoord);
+        vec4 base = texture2D(u_image, uv);
+        vec3 color = base.rgb;
 
-        // Digital Video Skin Chrominance Detector (ITU-R BT.601 YCbCr)
-        float Y = dot(color, vec3(0.299, 0.587, 0.114));
-        float Cb = dot(color, vec3(-0.1687, -0.3313, 0.5)) + 0.5;
-        float Cr = dot(color, vec3(0.5, -0.4187, -0.0813)) + 0.5;
-        // Broad YCbCr skin range with soft falloff; the face contour and exclusion
-        // zones below prevent hair/background/eyes/lips from being blurred.
-        float isSkinCb = smoothstep(0.27, 0.34, Cb) * (1.0 - smoothstep(0.56, 0.63, Cb));
-        float isSkinCr = smoothstep(0.45, 0.51, Cr) * (1.0 - smoothstep(0.69, 0.75, Cr));
-        float chromaSkin = isSkinCb * isSkinCr;
-        float isSkin = max(chromaSkin, inFaceContour * 0.22);
-
-        // Precise Face Region and Negative Exclusion Zones
-        float inFaceContour = 0.0;
-        float leftEyeExcl = 1.0;
-        float rightEyeExcl = 1.0;
-        float leftBrowExcl = 1.0;
-        float rightBrowExcl = 1.0;
-        float lipExcl = 1.0;
-        float nostrilExcl = 1.0;
-
+        float faceMask = 0.0;
+        float skinMask = 0.0;
         if (u_faceDetected == 1) {
-          vec2 faceCenter = (u_leftEye + u_rightEye + u_mouthCenter + u_forehead + u_chin) * 0.2;
-          float faceRx = max(distance(u_leftCheek, u_rightCheek) * 0.52, 0.05);
-          float faceRy = max(distance(u_forehead, u_chin) * 0.55, 0.06);
-          vec2 diff = uv - faceCenter;
-          float normFaceDist = length(vec2(diff.x / faceRx, diff.y / faceRy));
-          inFaceContour = smoothstep(1.05, 0.85, normFaceDist);
+          vec2 center = (u_leftCheek + u_rightCheek + u_forehead + u_chin) * 0.25;
+          vec2 radius = vec2(max(distance(u_leftCheek, u_rightCheek) * 0.58, 0.13),
+                             max(distance(u_forehead, u_chin) * 0.56, 0.18));
+          faceMask = ellipseMask(uv, center, radius);
 
-          // 1. Eyes exclusion: NEVER blur eyes, eyelashes, pupils, sclera
-          float eyeRadius = faceRx * 0.28;
-          leftEyeExcl = smoothstep(eyeRadius * 0.35, eyeRadius * 0.88, distance(uv, u_leftEye));
-          rightEyeExcl = smoothstep(eyeRadius * 0.35, eyeRadius * 0.88, distance(uv, u_rightEye));
+          float Y = dot(color, vec3(0.299, 0.587, 0.114));
+          float Cb = dot(color, vec3(-0.168736, -0.331264, 0.5)) + 0.5;
+          float Cr = dot(color, vec3(0.5, -0.418688, -0.081312)) + 0.5;
+          float cb = 1.0 - smoothstep(0.20, 0.62, Cb);
+          float cr = smoothstep(0.34, 0.43, Cr) * (1.0 - smoothstep(0.76, 0.84, Cr));
+          float luminanceGate = smoothstep(0.10, 0.75, Y);
+          float chromaSkin = clamp(cb * cr * luminanceGate, 0.0, 1.0);
 
-          // 2. Eyebrows exclusion
-          vec2 leftBrow = u_leftEye + vec2(0.0, -faceRy * 0.16);
-          vec2 rightBrow = u_rightEye + vec2(0.0, -faceRy * 0.16);
-          leftBrowExcl = smoothstep(eyeRadius * 0.25, eyeRadius * 0.75, distance(uv, leftBrow));
-          rightBrowExcl = smoothstep(eyeRadius * 0.25, eyeRadius * 0.75, distance(uv, rightBrow));
-
-          // 3. Lips exclusion for skin smoothing
-          vec2 mouthDiff = uv - u_mouthCenter;
-          float mouthNorm = length(vec2(mouthDiff.x / (faceRx * 0.44), mouthDiff.y / (faceRy * 0.22)));
-          lipExcl = smoothstep(0.65, 1.15, mouthNorm);
-
-          // 4. Nostrils exclusion
-          float nostrilDist = distance(uv, u_noseTip + vec2(0.0, faceRy * 0.03));
-          nostrilExcl = smoothstep(faceRx * 0.10, faceRx * 0.26, nostrilDist);
+          float eyeR = max(distance(u_leftEye, u_rightEye) * 0.15, 0.035);
+          float eyeCut = max(ellipseMask(uv, u_leftEye, vec2(eyeR * 1.5, eyeR)),
+                             ellipseMask(uv, u_rightEye, vec2(eyeR * 1.5, eyeR)));
+          float mouthCut = ellipseMask(uv, u_mouthCenter, vec2(radius.x * 0.38, radius.y * 0.18));
+          float browCut = max(ellipseMask(uv, u_leftEye + vec2(0.0, -radius.y * 0.18), vec2(eyeR * 1.7, eyeR * 0.65)),
+                              ellipseMask(uv, u_rightEye + vec2(0.0, -radius.y * 0.18), vec2(eyeR * 1.7, eyeR * 0.65)));
+          skinMask = faceMask * max(chromaSkin, 0.32) * (1.0 - eyeCut * 0.90) * (1.0 - mouthCut * 0.75) * (1.0 - browCut * 0.65);
         }
 
-        // Composite skin weight (0.0 on hair, eyes, eyebrows, nostrils, lips, clothing, background)
-        float skinMask = inFaceContour * leftEyeExcl * rightEyeExcl * leftBrowExcl * rightBrowExcl * lipExcl * nostrilExcl * isSkin;
-        if (u_faceDetected == 0) skinMask = 0.0;
-
-        // 1. Bilateral Skin Smoothing (Strictly applied to skinMask > 0.01)
+        // Gentle bilateral-like smoothing: 9 taps, weighted by color similarity.
         if (u_smooth > 0.0 && skinMask > 0.01) {
-          vec2 step = 1.6 / u_resolution;
-          vec3 sum = vec3(0.0);
-          float totalWeight = 0.0;
-
-          vec2 taps[13];
-          taps[0] = vec2(0.0);
-          taps[1] = vec2(1.0, 0.0); taps[2] = vec2(-1.0, 0.0);
-          taps[3] = vec2(0.0, 1.0); taps[4] = vec2(0.0, -1.0);
-          taps[5] = vec2(1.0, 1.0); taps[6] = vec2(-1.0, 1.0);
-          taps[7] = vec2(1.0, -1.0); taps[8] = vec2(-1.0, -1.0);
-          taps[9] = vec2(2.0, 0.0); taps[10] = vec2(-2.0, 0.0);
-          taps[11] = vec2(0.0, 2.0); taps[12] = vec2(0.0, -2.0);
-          for (int i = 0; i < 13; i++) {
-            vec2 offset = taps[i] * step;
-            vec3 sampleCol = texture2D(u_image, uv + offset).rgb;
-            float spatialWeight = i == 0 ? 1.0 : (i < 9 ? 0.72 : 0.38);
-            float colorWeight = exp(-distance(sampleCol, color) * 18.0);
-            float w = spatialWeight * colorWeight;
-            sum += sampleCol * w;
-            totalWeight += w;
+          vec2 px = 1.5 / u_resolution;
+          vec3 sum = color * 1.5;
+          float total = 1.5;
+          for (int i = 0; i < 8; i++) {
+            float a = 0.785398 * float(i);
+            vec2 off = vec2(cos(a), sin(a)) * px * 2.0;
+            vec3 s = texture2D(u_image, uv + off).rgb;
+            float cw = exp(-distance(s, color) * 12.0);
+            sum += s * cw;
+            total += cw;
           }
-
-          if (totalWeight > 0.0) {
-            vec3 smoothed = sum / totalWeight;
-            color = mix(color, smoothed, (u_smooth / 100.0) * skinMask * 0.88);
-          }
+          vec3 smooth = sum / total;
+          color = mix(color, smooth, (u_smooth / 100.0) * skinMask * 0.82);
         }
 
-        // 2. Skin Tone Enhancement (Luminous healthy undertone, zero effect on background)
         if (u_tone > 0.0 && skinMask > 0.01) {
-          vec3 toneTarget = color * vec3(1.04, 0.99, 0.96) + vec3(0.015, 0.008, 0.005);
-          color = mix(color, toneTarget, (u_tone / 100.0) * skinMask * 0.42);
+          vec3 healthy = color * vec3(1.035, 1.005, 0.985) + vec3(0.012, 0.006, 0.004);
+          color = mix(color, healthy, (u_tone / 100.0) * skinMask * 0.55);
         }
 
-        // 3. Highlight Specular Glow (Subtle pearlescent bloom on cheekbone & forehead skin highlights)
         if (u_glow > 0.0 && skinMask > 0.01) {
-          float luma = dot(color, vec3(0.299, 0.587, 0.114));
-          float highlight = smoothstep(0.50, 0.86, luma);
-          vec3 glowColor = vec3(1.0, 0.96, 0.92);
-          color += glowColor * highlight * (u_glow / 100.0) * 0.25 * skinMask;
-        }
-
-        // 4. Sharpness (Laplacian unsharp mask)
-        if (u_sharpness > 0.0) {
-          vec2 step = 1.0 / u_resolution;
-          vec3 n = texture2D(u_image, uv + vec2(0.0, step.y)).rgb;
-          vec3 s = texture2D(u_image, uv - vec2(0.0, step.y)).rgb;
-          vec3 e = texture2D(u_image, uv + vec2(step.x, 0.0)).rgb;
-          vec3 w = texture2D(u_image, uv - vec2(step.x, 0.0)).rgb;
-          vec3 laplacian = color * 4.0 - (n + s + e + w);
-          color += laplacian * (u_sharpness / 100.0) * 0.22;
-        }
-
-        // 5. Eye whites/catchlight enhancement, localized to the eye orbits.
-        if (u_eyeBright > 0.0 && u_faceDetected == 1) {
-          float eyeR = max(distance(u_leftEye, u_rightEye) * 0.22, 0.025);
-          float dl = distance(uv, u_leftEye);
-          float dr = distance(uv, u_rightEye);
-          float eyeMask = max(
-            smoothstep(eyeR, eyeR * 0.15, dl),
-            smoothstep(eyeR, eyeR * 0.15, dr)
-          );
           float lum = dot(color, vec3(0.299, 0.587, 0.114));
-          float bright = (1.0 - lum) * 0.16;
-          color += vec3(bright) * eyeMask * (u_eyeBright / 100.0);
+          float hi = smoothstep(0.38, 0.82, lum);
+          color += vec3(1.0, 0.91, 0.88) * hi * (u_glow / 100.0) * skinMask * 0.12;
         }
 
-        // 5. Lip Enhancement (Natural berry-rose tint and hydration gloss)
+        if (u_eyeBright > 0.0 && u_faceDetected == 1) {
+          float r = max(distance(u_leftEye, u_rightEye) * 0.13, 0.025);
+          float e = max(ellipseMask(uv, u_leftEye, vec2(r * 1.65, r)), ellipseMask(uv, u_rightEye, vec2(r * 1.65, r)));
+          float lum = dot(color, vec3(0.299, 0.587, 0.114));
+          color += vec3(0.16) * e * (1.0 - lum) * (u_eyeBright / 100.0);
+        }
+
         if (u_lips > 0.0 && u_faceDetected == 1) {
-          float faceRx = max(distance(u_leftCheek, u_rightCheek) * 0.52, 0.05);
-          float faceRy = max(distance(u_forehead, u_chin) * 0.55, 0.06);
-          vec2 mouthDiff = uv - u_mouthCenter;
-          float mouthNorm = length(vec2(mouthDiff.x / (faceRx * 0.40), mouthDiff.y / (faceRy * 0.18)));
-          if (mouthNorm < 1.0) {
-            float lipWeight = smoothstep(1.0, 0.2, mouthNorm);
-            vec3 berryLip = vec3(1.15, 0.78, 0.88);
-            color = mix(color, color * berryLip, (u_lips / 100.0) * lipWeight * 0.5);
-            if (mouthDiff.y > 0.0) {
-              float gloss = smoothstep(0.4, 0.1, length(vec2(mouthDiff.x / (faceRx * 0.15), (mouthDiff.y - faceRy * 0.05) / (faceRy * 0.06))));
-              color += vec3(0.12, 0.08, 0.08) * gloss * (u_lips / 100.0);
-            }
-          }
+          float lip = ellipseMask(uv, u_mouthCenter, vec2(max(distance(u_leftCheek, u_rightCheek) * 0.22, 0.06),
+                                                          max(distance(u_forehead, u_chin) * 0.065, 0.025)));
+          vec3 lipTone = vec3(1.08, 0.72, 0.82);
+          color = mix(color, color * lipTone, lip * (u_lips / 100.0) * 0.32);
         }
 
-        // 6. Teeth Whitening (Active ONLY when mouth is open > 0.22 and inside tooth aperture)
-        if (u_teeth > 0.0 && u_faceDetected == 1 && u_mouthOpen > 0.22) {
-          float faceRx = max(distance(u_leftCheek, u_rightCheek) * 0.52, 0.05);
-          float faceRy = max(distance(u_forehead, u_chin) * 0.55, 0.06);
-          vec2 mouthDiff = uv - u_mouthCenter;
-          float mouthNorm = length(vec2(mouthDiff.x / (faceRx * 0.28), mouthDiff.y / (faceRy * 0.10)));
-          if (mouthNorm < 1.0) {
-            float toothWeight = smoothstep(1.0, 0.1, mouthNorm);
-            float luma = dot(color, vec3(0.299, 0.587, 0.114));
-            if (luma > 0.38) {
-              float sat = (u_teeth / 100.0) * toothWeight * 0.75;
-              vec3 desaturated = mix(color, vec3(luma * 1.12), sat);
-              color = mix(color, desaturated, toothWeight);
-            }
-          }
+        if (u_teeth > 0.0 && u_faceDetected == 1 && u_mouthOpen > 0.20) {
+          float tooth = ellipseMask(uv, u_mouthCenter,
+                                    vec2(max(distance(u_leftCheek, u_rightCheek) * 0.16, 0.045),
+                                         max(distance(u_forehead, u_chin) * 0.045, 0.018)));
+          float lum = dot(color, vec3(0.299, 0.587, 0.114));
+          if (lum > 0.30) color = mix(color, vec3(max(lum, 0.72)), tooth * (u_teeth / 100.0) * 0.55);
         }
 
-        // 7. Global Camera Tones (Brightness, Contrast, Saturation)
-        float contrast = u_contrast / 100.0;
+        float contrast = max(u_contrast / 100.0, 0.01);
         float brightness = (u_brightness - 100.0) / 100.0;
         color = (color - 0.5) * contrast + 0.5 + brightness;
-
         float gray = dot(color, vec3(0.299, 0.587, 0.114));
-        float sat = u_saturation / 100.0;
-        color = mix(vec3(gray), color, sat);
+        color = mix(vec3(gray), color, max(u_saturation / 100.0, 0.0));
 
-        gl_FragColor = vec4(clamp(color, 0.0, 1.0), baseColor.a);
+        if (u_sharpness > 0.0) {
+          vec2 p = 1.0 / u_resolution;
+          vec3 n = texture2D(u_image, uv + vec2(0.0, p.y)).rgb;
+          vec3 s = texture2D(u_image, uv - vec2(0.0, p.y)).rgb;
+          vec3 e = texture2D(u_image, uv + vec2(p.x, 0.0)).rgb;
+          vec3 w = texture2D(u_image, uv - vec2(p.x, 0.0)).rgb;
+          vec3 edge = color * 5.0 - n - s - e - w;
+          color += (edge - color) * (u_sharpness / 100.0) * 0.18;
+        }
+
+        gl_FragColor = vec4(clamp(color, 0.0, 1.0), base.a);
       }
     `;
     this.beautyProgram = this.compileProgram(vsSource, beautyFs);

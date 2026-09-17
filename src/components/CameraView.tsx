@@ -24,10 +24,12 @@ import { FilterEngine } from "../utils/filterEngine";
 import { GpuPipeline } from "../core/renderer/GpuPipeline";
 import { BeautyConfig } from "../core/types";
 import confetti from "canvas-confetti";
+import { BUILT_IN_FILTERS, BuiltInFilter } from "../data/builtInFilters";
 
 interface CameraViewProps {
   beautyParams: BeautyParameters;
   activeMaskId: ARMaskId;
+  activeBuiltInFilterId?: string | null;
   onAddMedia?: (media: CapturedMedia) => void;
   onCapture?: (media: CapturedMedia) => void;
   onFpsUpdate?: (fps: number) => void;
@@ -42,6 +44,7 @@ interface CameraViewProps {
 export const CameraView: React.FC<CameraViewProps> = ({
   beautyParams,
   activeMaskId,
+  activeBuiltInFilterId = null,
   onAddMedia,
   onCapture,
   onFpsUpdate,
@@ -190,10 +193,12 @@ export const CameraView: React.FC<CameraViewProps> = ({
         }
         const landmarks = lastLandmarksRef.current;
 
+        const builtIn = getBuiltInFilter();
+        const builtInBoost = builtIn ? Math.min(30, Math.round((builtIn.parameters.smoothing ?? 0) * 0.18)) : 0;
         const beautyConfig: BeautyConfig = {
-          smooth: beautyParams.skinSmoothing,
-          glow: beautyParams.skinToneGlow,
-          tone: beautyParams.skinToneGlow,
+          smooth: Math.min(100, beautyParams.skinSmoothing + builtInBoost),
+          glow: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.20),
+          tone: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.15),
           brightness: beautyParams.brightness,
           contrast: beautyParams.contrast,
           saturation: beautyParams.saturation,
@@ -230,14 +235,18 @@ export const CameraView: React.FC<CameraViewProps> = ({
           // Keep existing AR asset library on top of the new GPU beauty output.
           const dt = Math.min((now - lastRenderTimeRef.current) / 1000, 0.1);
           lastRenderTimeRef.current = now;
-          filterEngineRef.current.renderAROverlay(
-            ctx,
-            canvas.width,
-            canvas.height,
-            activeMaskId,
-            landmarks,
-            dt || 1 / 30
-          );
+          if (activeBuiltInFilterId && builtIn) {
+            renderBuiltInOverlay(ctx, canvas.width, canvas.height, builtIn, landmarks, now / 1000);
+          } else {
+            filterEngineRef.current.renderAROverlay(
+              ctx,
+              canvas.width,
+              canvas.height,
+              activeMaskId,
+              landmarks,
+              dt || 1 / 30
+            );
+          }
         }
 
         frameCountRef.current++;
@@ -255,7 +264,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
     renderLoop();
     return () => cancelAnimationFrame(animId);
-  }, [beautyParams, activeMaskId, onFpsUpdate]);
+  }, [beautyParams, activeMaskId, activeBuiltInFilterId, onFpsUpdate]);
 
   // Snapshot Capture Function
   const triggerSnapshot = () => {
@@ -382,6 +391,73 @@ export const CameraView: React.FC<CameraViewProps> = ({
     setIsFullscreen(!isFullscreen);
   };
 
+  const getBuiltInFilter = (): BuiltInFilter | undefined =>
+    activeBuiltInFilterId ? BUILT_IN_FILTERS.find(f => f.id === activeBuiltInFilterId) : undefined;
+
+  const renderBuiltInOverlay = (
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    filter: BuiltInFilter,
+    landmarks: any,
+    time: number
+  ) => {
+    const c1 = filter.presetColors.primary;
+    const c2 = filter.presetColors.secondary;
+    const category = filter.category;
+    const hex = (h: string) => {
+      const v = h.replace('#','');
+      const n = parseInt(v.length === 3 ? v.split('').map(x=>x+x).join('') : v, 16);
+      return [(n>>16)&255,(n>>8)&255,n&255];
+    };
+    const a = hex(c1), b = hex(c2);
+    const face = landmarks?.faceDetected;
+    const fx = (landmarks?.noseTip?.x ?? .5) * width;
+    const fy = (landmarks?.noseTip?.y ?? .5) * height;
+    const fw = (landmarks?.headWidth ?? .35) * width;
+    const fh = (landmarks?.headHeight ?? .5) * height;
+    ctx.save();
+    const glow = (x:number,y:number,r:number,alpha:number) => {
+      const g=ctx.createRadialGradient(x,y,0,x,y,r);
+      g.addColorStop(0,`rgba(${a[0]},${a[1]},${a[2]},${alpha})`); g.addColorStop(1,`rgba(${b[0]},${b[1]},${b[2]},0)`);
+      ctx.fillStyle=g; ctx.fillRect(0,0,width,height);
+    };
+    const faceGlow=()=>{ if(!face)return; glow(fx,fy-fh*.05,fw*.9,.16); };
+
+    if (["Beauty","Makeup"].includes(category)) {
+      faceGlow();
+      if (face) {
+        ctx.globalAlpha = Math.min(.34, .12 + filter.parameters.glow/500);
+        ctx.fillStyle=c1; ctx.beginPath(); ctx.ellipse(fx-fw*.22,fy+fh*.10,fw*.15,fh*.06,0,0,Math.PI*2); ctx.ellipse(fx+fw*.22,fy+fh*.10,fw*.15,fh*.06,0,0,Math.PI*2); ctx.fill();
+        ctx.globalAlpha = Math.min(.45, .16 + filter.parameters.intensity/500);
+        ctx.fillStyle=c2; ctx.beginPath(); ctx.ellipse(fx,fy+fh*.23,fw*.13,fh*.045,0,0,Math.PI*2); ctx.fill();
+      }
+    } else if (category === "Glasses") {
+      if (face) {
+        const lx=landmarks.leftEye.x*width, ly=landmarks.leftEye.y*height, rx=landmarks.rightEye.x*width, ry=landmarks.rightEye.y*height;
+        const r=fw*.17; ctx.strokeStyle=c1; ctx.lineWidth=Math.max(3,fw*.025); ctx.globalAlpha=.92;
+        ctx.beginPath(); ctx.ellipse(lx,ly,r,r*.58,0,0,Math.PI*2); ctx.ellipse(rx,ry,r,r*.58,0,0,Math.PI*2); ctx.moveTo(lx+r,ly); ctx.lineTo(rx-r,ry); ctx.stroke();
+      }
+    } else if (["Hats","Hair","Seasonal","Festival"].includes(category)) {
+      if (face) { ctx.strokeStyle=c1; ctx.fillStyle=`rgba(${a[0]},${a[1]},${a[2]},.18)`; ctx.lineWidth=Math.max(3,fw*.03); ctx.beginPath(); ctx.arc(fx,fy-fh*.58,fw*.62,Math.PI,Math.PI*2); ctx.stroke(); ctx.beginPath(); ctx.ellipse(fx,fy-fh*.57,fw*.68,fh*.08,0,0,Math.PI*2); ctx.fill(); }
+    } else if (category === "Cute Animals") {
+      if (face) { ctx.fillStyle=`rgba(${a[0]},${a[1]},${a[2]},.78)`; ctx.beginPath(); ctx.ellipse(fx-fw*.47,fy-fh*.48,fw*.22,fh*.30,-.25,0,Math.PI*2); ctx.ellipse(fx+fw*.47,fy-fh*.48,fw*.22,fh*.30,.25,0,Math.PI*2); ctx.fill(); ctx.fillStyle=c2; ctx.beginPath(); ctx.ellipse(fx,fy+fh*.02,fw*.10,fh*.07,0,0,Math.PI*2); ctx.fill(); }
+    } else if (["Neon","Cyberpunk"].includes(category)) {
+      if (face) { ctx.globalAlpha=.72; ctx.strokeStyle=c1; ctx.lineWidth=Math.max(2,fw*.012); ctx.beginPath(); ctx.ellipse(fx,fy-fh*.03,fw*.53,fh*.52,0,0,Math.PI*2); ctx.stroke(); glow(fx,fy,fw*.8,.10); }
+    } else if (["Golden Hour","Vintage","Retro Film","Black & White","HDR","Blur","Bokeh"].includes(category)) {
+      if (category === "Black & White") { ctx.fillStyle='rgba(128,128,128,.28)'; ctx.globalCompositeOperation='saturation'; ctx.fillRect(0,0,width,height); }
+      else if (category === "Bokeh" || category === "Blur") { ctx.globalAlpha=.10; for(let i=0;i<18;i++){const x=(Math.sin(i*12.7)*.5+.5)*width,y=(Math.cos(i*7.3)*.5+.5)*height,r=8+(i%5)*8;ctx.fillStyle=i%2?c1:c2;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();}}
+      else { const g=ctx.createLinearGradient(0,0,width,height);g.addColorStop(0,`rgba(${a[0]},${a[1]},${a[2]},.08)`);g.addColorStop(1,`rgba(${b[0]},${b[1]},${b[2]},.10)`);ctx.fillStyle=g;ctx.fillRect(0,0,width,height); }
+    } else if (["Snow","Rain","Fire","Hearts","Sparkles","Butterfly"].includes(category)) {
+      const count = category === "Snow" ? 55 : 26;
+      ctx.globalAlpha=.65;
+      for(let i=0;i<count;i++) { const x=(Math.sin(i*17.13)*.5+.5)*width; const y=(Math.cos(i*9.71 + time*.35*(1+i%3))*.5+.5)*height; const size=2+(i%4)*1.8; ctx.fillStyle=i%2?c1:c2; ctx.beginPath(); if(category==='Hearts'){ctx.font=`${10+size*2}px sans-serif`;ctx.fillText('♥',x,y);} else if(category==='Rain'){ctx.moveTo(x,y);ctx.lineTo(x-2,y+16);ctx.strokeStyle=c1;ctx.stroke();} else {ctx.arc(x,y,size,0,Math.PI*2);ctx.fill();} }
+    } else if (["Cartoon","Anime","Comic","Sketch"].includes(category)) {
+      if (face) { ctx.globalAlpha=.20; ctx.strokeStyle=c1; ctx.lineWidth=Math.max(1.5,fw*.01); ctx.beginPath();ctx.ellipse(fx,fy,fw*.50,fh*.52,0,0,Math.PI*2);ctx.stroke(); glow(fx,fy,fw*.75,.07); }
+    }
+    ctx.restore();
+  };
+
   return (
     <div
       className={`relative flex flex-col items-center justify-center bg-slate-950 rounded-3xl overflow-hidden border border-slate-800/80 shadow-2xl transition-all ${
@@ -471,26 +547,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
           </div>
         </div>
       </div>}
-
-      {mobileMode && (
-        <div className="absolute top-0 inset-x-0 z-30 flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top)+12px)] pointer-events-none">
-          <div className="pointer-events-auto px-3 py-1.5 rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white text-[11px] font-semibold">
-            SnapAR Mobile Test
-          </div>
-          <div className="flex items-center gap-2 pointer-events-auto">
-            <button
-              onClick={onToggleCameraFacing}
-              className="w-10 h-10 rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white flex items-center justify-center active:scale-95"
-              title="Switch front / back camera"
-            >
-              <FlipHorizontal className="w-5 h-5" />
-            </button>
-            <div className="px-3 py-1.5 rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white text-[10px] font-mono">
-              {cameraFacing === "user" ? "FRONT" : "BACK"}
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Floating Bottom Capture & Control Toolbar */}
       <div className={`absolute inset-x-0 z-30 flex items-center justify-center gap-4 pointer-events-auto px-4 ${mobileMode ? "bottom-[236px]" : "bottom-4"}`}>
