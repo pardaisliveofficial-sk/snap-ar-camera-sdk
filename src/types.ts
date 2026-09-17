@@ -216,6 +216,7 @@ export interface CameraSdkConfig {
 }
 
 export type DashboardSection =
+  | "mobile_test"
   | "test_lab"
   | "test_report"
   | "camera_preview"

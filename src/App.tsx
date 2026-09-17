@@ -20,6 +20,7 @@ import { SdkDownloadCenterView } from "./components/SdkDownloadCenterView";
 import { DocumentationView } from "./components/DocumentationView";
 import { ArCameraTestLab } from "./components/testlab/ArCameraTestLab";
 import { TestReportView } from "./components/testlab/TestReportView";
+import { MobileCameraTestView } from "./components/MobileCameraTestView";
 
 import { AR_MASKS, DEFAULT_BEAUTY_PARAMS } from "./data/presets";
 import {
@@ -31,8 +32,8 @@ import {
 } from "./types";
 
 export default function App() {
-  // Application & Active Navigation State - Defaults directly to the AR Camera Test Lab
-  const [activeSection, setActiveSection] = useState<DashboardSection>("test_lab");
+  // Application & Active Navigation State - Mobile Test is the default validation surface
+  const [activeSection, setActiveSection] = useState<DashboardSection>("mobile_test");
   const [activeMaskId, setActiveMaskId] = useState<ARMaskId>("cute_puppy");
   const [beautyParams, setBeautyParams] = useState<BeautyParameters>(DEFAULT_BEAUTY_PARAMS);
 
@@ -89,6 +90,21 @@ export default function App() {
       setBeautyParams((prev) => ({ ...prev, ...params }));
     }
   };
+
+  if (activeSection === "mobile_test") {
+    return (
+      <MobileCameraTestView
+        activeMaskId={activeMaskId}
+        onSelectMask={setActiveMaskId}
+        beautyParams={beautyParams}
+        onChangeBeauty={setBeautyParams}
+        cameraFacing={cameraFacing}
+        onToggleCameraFacing={() => setCameraFacing((prev) => (prev === "user" ? "environment" : "user"))}
+        onCapture={handleCapture}
+        onExit={() => setActiveSection("test_lab")}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-pink-500 selection:text-white">

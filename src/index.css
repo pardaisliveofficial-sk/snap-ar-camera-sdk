@@ -1,1 +1,5 @@
 @import "tailwindcss";
+
+/* Mobile camera test: native-feeling horizontal strips and safe-area spacing */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; }

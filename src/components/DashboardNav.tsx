@@ -16,6 +16,7 @@ import {
   Zap,
   FlaskConical,
   ShieldCheck,
+  Smartphone,
 } from "lucide-react";
 import { DashboardSection } from "../types";
 
@@ -29,6 +30,7 @@ export const DashboardNav: React.FC<DashboardNavProps> = ({
   onSelectSection,
 }) => {
   const sections: { id: DashboardSection; label: string; icon: any; tag?: string }[] = [
+    { id: "mobile_test", label: "Mobile Camera Test", icon: Smartphone, tag: "TikTok-style" },
     { id: "test_lab", label: "AR Camera Test Lab", icon: FlaskConical, tag: "Live 3-Layer" },
     { id: "test_report", label: "Test Report", icon: ShieldCheck, tag: "19 Tests" },
     { id: "camera_preview", label: "Camera Preview", icon: Camera },

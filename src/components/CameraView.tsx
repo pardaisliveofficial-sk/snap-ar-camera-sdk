@@ -35,6 +35,8 @@ interface CameraViewProps {
   onOpenGallery?: () => void;
   cameraFacing?: "user" | "environment";
   resolution?: string;
+  mobileMode?: boolean;
+  onToggleCameraFacing?: () => void;
 }
 
 export const CameraView: React.FC<CameraViewProps> = ({
@@ -45,6 +47,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
   onFpsUpdate,
   cameraFacing = "user",
   resolution = "1080p",
+  mobileMode = false,
+  onToggleCameraFacing,
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -53,6 +57,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>("");
   const [isFlipped, setIsFlipped] = useState(true);
+
+  useEffect(() => {
+    setIsFlipped(cameraFacing === "user");
+  }, [cameraFacing]);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Before vs After Split Screen
@@ -100,26 +108,35 @@ export const CameraView: React.FC<CameraViewProps> = ({
         stream.getTracks().forEach((t) => t.stop());
       }
 
-      const videoConstraints: MediaTrackConstraints = deviceId
-        ? {
-            deviceId: { exact: deviceId },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30, max: 30 },
-          }
-        : {
-            facingMode: { ideal: cameraFacing },
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            frameRate: { ideal: 30, max: 30 },
-          };
-
-      const constraints: MediaStreamConstraints = {
-        video: videoConstraints,
-        audio: false,
+      const baseVideo = {
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+        frameRate: { ideal: 30, max: 30 },
       };
 
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const exactVideoConstraints: MediaTrackConstraints = deviceId
+        ? { deviceId: { exact: deviceId }, ...baseVideo }
+        : { facingMode: { exact: cameraFacing }, ...baseVideo };
+
+      const fallbackVideoConstraints: MediaTrackConstraints = deviceId
+        ? { deviceId: { exact: deviceId }, ...baseVideo }
+        : { facingMode: { ideal: cameraFacing }, ...baseVideo };
+
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: exactVideoConstraints,
+          audio: false,
+        });
+      } catch (firstError) {
+        // Some mobile browsers reject exact facingMode even though they can switch cameras.
+        // Retry with ideal facingMode before surfacing the failure.
+        console.warn("Exact camera selection failed; retrying with ideal facingMode", firstError);
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: fallbackVideoConstraints,
+          audio: false,
+        });
+      }
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
@@ -368,7 +385,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
   return (
     <div
       className={`relative flex flex-col items-center justify-center bg-slate-950 rounded-3xl overflow-hidden border border-slate-800/80 shadow-2xl transition-all ${
-        isFullscreen ? "fixed inset-0 z-50 rounded-none border-none" : "w-full aspect-[16/9] min-h-[420px]"
+        mobileMode
+          ? "fixed inset-0 z-50 w-screen h-[100dvh] rounded-none border-none"
+          : isFullscreen
+            ? "fixed inset-0 z-50 rounded-none border-none"
+            : "w-full aspect-[16/9] min-h-[420px]"
       }`}
     >
       {/* Hidden Raw HTML5 Video Element */}
@@ -400,7 +421,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
       )}
 
       {/* Camera HUD Overlay */}
-      <div className="absolute inset-0 pointer-events-none p-4 flex flex-col justify-between z-20">
+      {!mobileMode && <div className="absolute inset-0 pointer-events-none p-4 flex flex-col justify-between z-20">
         {/* Top HUD Row */}
         <div className="flex items-start justify-between w-full">
           {/* SDK Pipeline Active Badge */}
@@ -449,12 +470,32 @@ export const CameraView: React.FC<CameraViewProps> = ({
             </button>
           </div>
         </div>
-      </div>
+      </div>}
+
+      {mobileMode && (
+        <div className="absolute top-0 inset-x-0 z-30 flex items-center justify-between px-4 pt-[calc(env(safe-area-inset-top)+12px)] pointer-events-none">
+          <div className="pointer-events-auto px-3 py-1.5 rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white text-[11px] font-semibold">
+            SnapAR Mobile Test
+          </div>
+          <div className="flex items-center gap-2 pointer-events-auto">
+            <button
+              onClick={onToggleCameraFacing}
+              className="w-10 h-10 rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white flex items-center justify-center active:scale-95"
+              title="Switch front / back camera"
+            >
+              <FlipHorizontal className="w-5 h-5" />
+            </button>
+            <div className="px-3 py-1.5 rounded-full bg-black/45 backdrop-blur-md border border-white/15 text-white text-[10px] font-mono">
+              {cameraFacing === "user" ? "FRONT" : "BACK"}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Floating Bottom Capture & Control Toolbar */}
-      <div className="absolute bottom-4 inset-x-0 z-30 flex items-center justify-center gap-4 pointer-events-auto px-4">
+      <div className={`absolute inset-x-0 z-30 flex items-center justify-center gap-4 pointer-events-auto px-4 ${mobileMode ? "bottom-[236px]" : "bottom-4"}`}>
         {/* Device Dropdown Selector */}
-        {devices.length > 1 && (
+        {devices.length > 1 && !mobileMode && (
           <select
             value={selectedDeviceId}
             onChange={(e) => {
