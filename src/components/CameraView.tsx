@@ -21,6 +21,8 @@ import {
 } from "../types";
 import { FaceTracker } from "../utils/faceTracker";
 import { FilterEngine } from "../utils/filterEngine";
+import { GpuPipeline } from "../core/renderer/GpuPipeline";
+import { BeautyConfig } from "../core/types";
 import confetti from "canvas-confetti";
 
 interface CameraViewProps {
@@ -71,6 +73,10 @@ export const CameraView: React.FC<CameraViewProps> = ({
   // Engine Instances
   const faceTrackerRef = useRef<FaceTracker>(new FaceTracker());
   const filterEngineRef = useRef<FilterEngine>(new FilterEngine());
+  const gpuPipelineRef = useRef<GpuPipeline>(new GpuPipeline());
+  const lastTrackingTimeRef = useRef(0);
+  const lastLandmarksRef = useRef(faceTrackerRef.current.detectNextFrame(tempCanvasRef.current));
+  const lastRenderTimeRef = useRef(performance.now());
 
   // Performance tracking
   const frameCountRef = useRef(0);
@@ -86,18 +92,12 @@ export const CameraView: React.FC<CameraViewProps> = ({
     shutterAudioRef.current = audio;
   }, []);
 
-  // Initialize Camera. The facing direction is a physical camera selection,
-  // not a mirror/transform operation.
-  const startCamera = useCallback(async (deviceId?: string, facing: "user" | "environment" = cameraFacing) => {
+  // Initialize Camera
+  const startCamera = useCallback(async (deviceId?: string) => {
     try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        throw new Error("Camera access is not supported in this browser.");
-      }
-
-      if (videoRef.current?.srcObject) {
-        const oldStream = videoRef.current.srcObject as MediaStream;
-        oldStream.getTracks().forEach((track) => track.stop());
-        videoRef.current.srcObject = null;
+      if (videoRef.current && videoRef.current.srcObject) {
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach((t) => t.stop());
       }
 
       const videoConstraints: MediaTrackConstraints = deviceId
@@ -108,121 +108,137 @@ export const CameraView: React.FC<CameraViewProps> = ({
             frameRate: { ideal: 30, max: 30 },
           }
         : {
-            // exact prevents the browser from silently keeping the front camera
-            // when the user requested the rear camera (or vice versa).
-            facingMode: { exact: facing },
+            facingMode: { ideal: cameraFacing },
             width: { ideal: 1280 },
             height: { ideal: 720 },
             frameRate: { ideal: 30, max: 30 },
           };
 
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const constraints: MediaStreamConstraints = {
         video: videoConstraints,
         audio: false,
-      });
+      };
 
-      const actualFacing = stream.getVideoTracks()[0]?.getSettings?.().facingMode;
-      if (!deviceId && actualFacing && actualFacing !== facing) {
-        stream.getTracks().forEach((track) => track.stop());
-        throw new Error(
-          `Requested ${facing === "user" ? "front" : "rear"} camera, but the browser opened the other camera.`
-        );
-      }
-
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         await videoRef.current.play();
+
+        // Initialize Face Tracker
         await faceTrackerRef.current.init(videoRef.current);
       }
-
-      // Auto mirror follows the physical camera. Manual flip remains available.
-      setIsFlipped(facing === "user");
     } catch (err) {
-      console.warn("Camera access/switch failed:", err);
+      console.warn("Camera access failed or user denied permission:", err);
     }
   }, [cameraFacing]);
 
-  // Enumerate cameras once after permission is available.
+  // Enumerate Webcams
   useEffect(() => {
-    let cancelled = false;
-    const init = async () => {
+    const getDevices = async () => {
       try {
         const devs = await navigator.mediaDevices.enumerateDevices();
-        if (!cancelled) {
-          setDevices(devs.filter((d) => d.kind === "videoinput"));
+        const videoDevs = devs.filter((d) => d.kind === "videoinput");
+        setDevices(videoDevs);
+        if (videoDevs.length > 0 && !selectedDeviceId) {
+          setSelectedDeviceId(videoDevs[0].deviceId);
         }
-      } catch {
-        // Camera list is optional; the facingMode API still works.
-      }
-      await startCamera(undefined, cameraFacing);
-    };
-    init();
-
-    return () => {
-      cancelled = true;
-      if (videoRef.current?.srcObject) {
-        (videoRef.current.srcObject as MediaStream).getTracks().forEach((t) => t.stop());
-        videoRef.current.srcObject = null;
+      } catch (e) {
+        // Enumerate error fallback
       }
     };
-  }, [startCamera, cameraFacing]);
+    getDevices();
+    startCamera(undefined);
+  }, [startCamera]);
 
-  // Render Loop
+  // Render Loop: GPU beauty first, then AR overlay. This is the production preview path.
   useEffect(() => {
     let animId: number;
 
     const renderLoop = () => {
-      if (videoRef.current && canvasRef.current) {
-        const video = videoRef.current;
-        const canvas = canvasRef.current;
-        const ctx = canvas.getContext("2d");
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      if (video && canvas && video.readyState >= 2 && video.videoWidth > 0) {
+        const targetW = Math.min(video.videoWidth, 1280);
+        const targetH = Math.round((video.videoHeight / video.videoWidth) * targetW);
+        if (canvas.width !== targetW || canvas.height !== targetH) {
+          canvas.width = targetW;
+          canvas.height = targetH;
+        }
 
-        if (ctx && video.readyState >= 2) {
-          if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
-            canvas.width = video.videoWidth || 1280;
-            canvas.height = video.videoHeight || 720;
+        const now = performance.now();
+        // Face tracking is expensive; keep it around 24-30Hz while the renderer stays smooth.
+        if (now - lastTrackingTimeRef.current >= 34) {
+          lastLandmarksRef.current = faceTrackerRef.current.detectNextFrame(tempCanvasRef.current);
+          lastTrackingTimeRef.current = now;
+        }
+        const landmarks = lastLandmarksRef.current;
+
+        const beautyConfig: BeautyConfig = {
+          smooth: beautyParams.skinSmoothing,
+          glow: beautyParams.skinToneGlow,
+          tone: beautyParams.skinToneGlow,
+          brightness: beautyParams.brightness,
+          contrast: beautyParams.contrast,
+          saturation: beautyParams.saturation,
+          sharpness: beautyParams.sharpening,
+          faceSlim: beautyParams.faceSlimming,
+          eyeScale: beautyParams.eyeEnlargement,
+          noseSlim: beautyParams.noseSlimming,
+          jaw: Math.round(beautyParams.faceSlimming * 0.75),
+          lips: beautyParams.lipTint,
+          teeth: beautyParams.teethWhitening,
+          eyeBright: beautyParams.eyeBrightening,
+        };
+
+        const gpuCanvas = gpuPipelineRef.current.render(
+          video,
+          beautyConfig,
+          true,
+          "none",
+          false,
+          landmarks as any,
+          "beauty",
+          0
+        );
+
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          if (gpuCanvas) {
+            ctx.drawImage(gpuCanvas, 0, 0, canvas.width, canvas.height);
+          } else {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
           }
 
-          // Detect Face Landmarks
-          const landmarks = faceTrackerRef.current.detectNextFrame(tempCanvasRef.current);
-
-          // Apply Filter Engine Processing
-          filterEngineRef.current.render(
+          // Keep existing AR asset library on top of the new GPU beauty output.
+          const dt = Math.min((now - lastRenderTimeRef.current) / 1000, 0.1);
+          lastRenderTimeRef.current = now;
+          filterEngineRef.current.renderAROverlay(
             ctx,
-            video,
             canvas.width,
             canvas.height,
-            beautyParams,
             activeMaskId,
             landmarks,
-            showSplit,
-            splitPos
+            dt || 1 / 30
           );
+        }
 
-          // FPS Metric Calculation
-          frameCountRef.current++;
-          const now = performance.now();
-          if (now - lastFpsTimeRef.current >= 1000) {
-            const currentFps = Math.round(
-              (frameCountRef.current * 1000) / (now - lastFpsTimeRef.current)
-            );
-            if (onFpsUpdate) {
-              onFpsUpdate(currentFps);
-            }
-            frameCountRef.current = 0;
-            lastFpsTimeRef.current = now;
-          }
+        frameCountRef.current++;
+        if (now - lastFpsTimeRef.current >= 1000) {
+          const currentFps = Math.round(
+            (frameCountRef.current * 1000) / (now - lastFpsTimeRef.current)
+          );
+          onFpsUpdate?.(currentFps);
+          frameCountRef.current = 0;
+          lastFpsTimeRef.current = now;
         }
       }
       animId = requestAnimationFrame(renderLoop);
     };
 
     renderLoop();
-
-    return () => {
-      cancelAnimationFrame(animId);
-    };
-  }, [beautyParams, activeMaskId, showSplit, splitPos, onFpsUpdate]);
+    return () => cancelAnimationFrame(animId);
+  }, [beautyParams, activeMaskId, onFpsUpdate]);
 
   // Snapshot Capture Function
   const triggerSnapshot = () => {
@@ -441,11 +457,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
         {devices.length > 1 && (
           <select
             value={selectedDeviceId}
-            onChange={async (e) => {
-              const id = e.target.value;
-              setSelectedDeviceId(id);
-              await startCamera(id);
-            }}
+            onChange={(e) => {
+                const id = e.target.value;
+                setSelectedDeviceId(id);
+                startCamera(id);
+              }}
             className="bg-slate-900/90 backdrop-blur-md border border-slate-700 text-slate-200 text-xs py-2 px-3 rounded-xl focus:outline-none max-w-[140px] truncate"
           >
             {devices.map((d, i) => (

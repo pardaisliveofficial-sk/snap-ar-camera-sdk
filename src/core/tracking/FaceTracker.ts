@@ -228,23 +228,6 @@ export class FaceTracker {
 
   public setVideoSource(video: HTMLVideoElement): void {
     this.videoElement = video;
-    // A new MediaStream can otherwise briefly reuse landmarks from the previous
-    // camera. Reset only the tracking state; keep the already-loaded model.
-    this.resetTrackingState();
-  }
-
-  public resetTrackingState(): void {
-    this.lastLandmarks = this.createEmptyLandmarks();
-    this.smoothedLandmarks = this.createEmptyLandmarks();
-    this.isDetecting = false;
-    this.lastTrackingRunTimestamp = 0;
-    this.trackingIterations = 0;
-    this.trackingFps = 0;
-    this.trackingLandmarkCount = 0;
-    this.trackingConfidence = 0;
-    this.faceDetectionState = this.isTasksVisionReady || this.isLegacyMeshReady
-      ? "NOT DETECTED"
-      : "INITIALIZING";
   }
 
   /**

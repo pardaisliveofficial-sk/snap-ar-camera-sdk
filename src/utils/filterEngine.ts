@@ -343,6 +343,18 @@ export class FilterEngine {
   // -------------------------------------------------------------
   // AR SNAPCHAT FILTERS & MASKS RENDERER
   // -------------------------------------------------------------
+  public renderAROverlay(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    maskId: ARMaskId,
+    landmarks: FaceLandmarks,
+    dt: number = 1 / 30
+  ) {
+    if (!landmarks.faceDetected || maskId === "none") return;
+    this.renderARMask(ctx, width, height, maskId, landmarks, dt);
+  }
+
   private renderARMask(
     ctx: CanvasRenderingContext2D,
     width: number,

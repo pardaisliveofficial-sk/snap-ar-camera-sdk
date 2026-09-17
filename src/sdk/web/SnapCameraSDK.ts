@@ -40,7 +40,6 @@ export class SnapCameraSDK {
   private arCanvas: HTMLCanvasElement;
   private arCtx: CanvasRenderingContext2D | null = null;
   private lastArRenderedPixels: number = 0;
-  private lastArPixelCheckTimestamp: number = 0;
   private isArDebugOverlayEnabled: boolean = false;
 
   // State
@@ -118,12 +117,6 @@ export class SnapCameraSDK {
     const newFacing = await this.cameraManager.switchCamera();
     const video = this.cameraManager.getVideoElement();
     this.faceTracker.setVideoSource(video);
-    // Keep automatic selfie mirroring tied to the physical camera, never to the
-    // switch button itself. "auto" = front mirrored, rear unmirrored.
-    if (this.mirroringMode === "auto") {
-      // State is derived from CameraManager.isFrontFacing(); no canvas flip is
-      // toggled as a side effect of changing cameras.
-    }
     return newFacing;
   }
 
@@ -421,9 +414,7 @@ export class SnapCameraSDK {
           this.isEffectsEnabled,
           landmarks,
           this.comparisonMode,
-          this.effectIntensity,
-          targetW,
-          targetH
+          this.effectIntensity
         );
 
         // 3. AR Filter Pass (Render to dedicated isolated buffer for framebuffer diagnostics)
@@ -455,18 +446,12 @@ export class SnapCameraSDK {
               this.isArEnabled,
               this.isArDebugOverlayEnabled
             );
-            // getImageData() forces a CPU readback. It is diagnostics only, so
-            // sample a few times per second instead of stalling every frame.
-            const now = performance.now();
-            if (now - this.lastArPixelCheckTimestamp >= 250) {
-              this.lastArPixelCheckTimestamp = now;
-              this.lastArRenderedPixels = this.calculateArRenderedPixels(
-                this.arCtx,
-                targetW,
-                targetH,
-                landmarks
-              );
-            }
+            this.lastArRenderedPixels = this.calculateArRenderedPixels(
+              this.arCtx,
+              targetW,
+              targetH,
+              landmarks
+            );
           }
         } else {
           this.lastArRenderedPixels = 0;

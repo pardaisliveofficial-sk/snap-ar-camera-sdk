@@ -42,6 +42,7 @@ export interface BeautyConfig {
   jaw: number; // 0 to 100 (Jaw contouring)
   lips: number; // 0 to 100 (Lip enhancement & color)
   teeth: number; // 0 to 100 (Teeth whitening)
+  eyeBright?: number; // 0 to 100 (Eye whites/catchlight)
 }
 
 export const DEFAULT_BEAUTY_CONFIG: BeautyConfig = {

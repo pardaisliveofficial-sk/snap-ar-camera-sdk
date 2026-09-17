@@ -281,7 +281,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-slate-900 bg-slate-950 text-slate-500 text-xs py-4 px-6 text-center">
-        <p>SnapAR Camera SDK — Web-first Real-Time Beauty, Effects & AR Camera Engine</p>
+        <p>SnapAR Camera SDK — Production-Ready Real-Time Beauty & AR Lens Engine for Android, iOS, Flutter, React Native, Unity, and Web</p>
       </footer>
 
       {/* Modals */}

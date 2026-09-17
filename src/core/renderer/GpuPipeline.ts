@@ -253,9 +253,12 @@ export class GpuPipeline {
         float Y = dot(color, vec3(0.299, 0.587, 0.114));
         float Cb = dot(color, vec3(-0.1687, -0.3313, 0.5)) + 0.5;
         float Cr = dot(color, vec3(0.5, -0.4187, -0.0813)) + 0.5;
-        float isSkinCb = smoothstep(0.33, 0.37, Cb) * (1.0 - smoothstep(0.50, 0.54, Cb));
-        float isSkinCr = smoothstep(0.50, 0.54, Cr) * (1.0 - smoothstep(0.66, 0.70, Cr));
-        float isSkin = isSkinCb * isSkinCr;
+        // Broad YCbCr skin range with soft falloff; the face contour and exclusion
+        // zones below prevent hair/background/eyes/lips from being blurred.
+        float isSkinCb = smoothstep(0.27, 0.34, Cb) * (1.0 - smoothstep(0.56, 0.63, Cb));
+        float isSkinCr = smoothstep(0.45, 0.51, Cr) * (1.0 - smoothstep(0.69, 0.75, Cr));
+        float chromaSkin = isSkinCb * isSkinCr;
+        float isSkin = max(chromaSkin, inFaceContour * 0.22);
 
         // Precise Face Region and Negative Exclusion Zones
         float inFaceContour = 0.0;
@@ -305,19 +308,22 @@ export class GpuPipeline {
           vec3 sum = vec3(0.0);
           float totalWeight = 0.0;
 
-          // 3x3 edge-aware bilateral kernel: 9 texture reads instead of 25.
-          // This keeps skin smoothing localized while making real-time mobile
-          // rendering substantially lighter.
-          for (int x = -1; x <= 1; x++) {
-            for (int y = -1; y <= 1; y++) {
-              vec2 offset = vec2(float(x), float(y)) * step;
-              vec3 sampleCol = texture2D(u_image, uv + offset).rgb;
-              float spatialWeight = exp(-float(x*x + y*y) / 3.0);
-              float colorWeight = exp(-distance(sampleCol, color) * 14.0);
-              float w = spatialWeight * colorWeight;
-              sum += sampleCol * w;
-              totalWeight += w;
-            }
+          vec2 taps[13];
+          taps[0] = vec2(0.0);
+          taps[1] = vec2(1.0, 0.0); taps[2] = vec2(-1.0, 0.0);
+          taps[3] = vec2(0.0, 1.0); taps[4] = vec2(0.0, -1.0);
+          taps[5] = vec2(1.0, 1.0); taps[6] = vec2(-1.0, 1.0);
+          taps[7] = vec2(1.0, -1.0); taps[8] = vec2(-1.0, -1.0);
+          taps[9] = vec2(2.0, 0.0); taps[10] = vec2(-2.0, 0.0);
+          taps[11] = vec2(0.0, 2.0); taps[12] = vec2(0.0, -2.0);
+          for (int i = 0; i < 13; i++) {
+            vec2 offset = taps[i] * step;
+            vec3 sampleCol = texture2D(u_image, uv + offset).rgb;
+            float spatialWeight = i == 0 ? 1.0 : (i < 9 ? 0.72 : 0.38);
+            float colorWeight = exp(-distance(sampleCol, color) * 18.0);
+            float w = spatialWeight * colorWeight;
+            sum += sampleCol * w;
+            totalWeight += w;
           }
 
           if (totalWeight > 0.0) {
@@ -349,6 +355,20 @@ export class GpuPipeline {
           vec3 w = texture2D(u_image, uv - vec2(step.x, 0.0)).rgb;
           vec3 laplacian = color * 4.0 - (n + s + e + w);
           color += laplacian * (u_sharpness / 100.0) * 0.22;
+        }
+
+        // 5. Eye whites/catchlight enhancement, localized to the eye orbits.
+        if (u_eyeBright > 0.0 && u_faceDetected == 1) {
+          float eyeR = max(distance(u_leftEye, u_rightEye) * 0.22, 0.025);
+          float dl = distance(uv, u_leftEye);
+          float dr = distance(uv, u_rightEye);
+          float eyeMask = max(
+            smoothstep(eyeR, eyeR * 0.15, dl),
+            smoothstep(eyeR, eyeR * 0.15, dr)
+          );
+          float lum = dot(color, vec3(0.299, 0.587, 0.114));
+          float bright = (1.0 - lum) * 0.16;
+          color += vec3(bright) * eyeMask * (u_eyeBright / 100.0);
         }
 
         // 5. Lip Enhancement (Natural berry-rose tint and hydration gloss)
@@ -776,6 +796,7 @@ export class GpuPipeline {
     setFloat("u_jaw", beauty.jaw);
     setFloat("u_lips", beauty.lips);
     setFloat("u_teeth", beauty.teeth);
+    setFloat("u_eyeBright", beauty.eyeBright ?? 0);
 
     const locFace = gl.getUniformLocation(prog, "u_faceDetected");
     if (locFace) gl.uniform1i(locFace, landmarks.faceDetected ? 1 : 0);
@@ -822,30 +843,15 @@ export class GpuPipeline {
     effectsEnabled: boolean,
     landmarks: FaceLandmarksData,
     mode: RenderComparisonMode,
-    effectIntensity: number = 1.0,
-    outputWidth?: number,
-    outputHeight?: number
+    effectIntensity: number = 1.0
   ): HTMLCanvasElement | null {
     if (!this.gl || !this.isSupported || !video || video.readyState < 2) {
       return null;
     }
 
     const gl = this.gl;
-    const sourceW = video.videoWidth || 1280;
-    const sourceH = video.videoHeight || 720;
-
-    // Do not run the beauty/effect fragment shaders at full sensor resolution.
-    // Mobile cameras commonly expose 1920x1080 while the preview is only ~720p.
-    // Processing the smaller output preserves aspect ratio and dramatically
-    // reduces fragment workload without changing the camera source.
-    let w = outputWidth || sourceW;
-    let h = outputHeight || sourceH;
-    const maxProcessingWidth = 1280;
-    if (w > maxProcessingWidth) {
-      const scale = maxProcessingWidth / w;
-      w = maxProcessingWidth;
-      h = Math.max(1, Math.round(h * scale));
-    }
+    const w = video.videoWidth || 1280;
+    const h = video.videoHeight || 720;
 
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w;

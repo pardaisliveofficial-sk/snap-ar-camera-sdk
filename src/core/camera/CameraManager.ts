@@ -14,7 +14,6 @@ export class CameraManager {
   private mediaRecorder: MediaRecorder | null = null;
   private recordedChunks: Blob[] = [];
   private recordingStartTime: number = 0;
-  private switchInProgress: Promise<"user" | "environment"> | null = null;
 
   constructor() {
     this.videoElement = document.createElement("video");
@@ -54,9 +53,7 @@ export class CameraManager {
     facing: "user" | "environment" = this.facingMode,
     resolution: "720p" | "1080p" | "4k" = "1080p"
   ): Promise<MediaStream> {
-    // Never let a browser silently choose another camera when a facing direction
-    // was explicitly requested. This is important on phones with multiple lenses.
-    const requestedFacing = facing;
+    this.facingMode = facing;
 
     let resWidth = 1920;
     let resHeight = 1080;
@@ -69,104 +66,52 @@ export class CameraManager {
     }
     this.targetResolution = { width: resWidth, height: resHeight, label: resolution };
 
-    if (!navigator?.mediaDevices?.getUserMedia) {
-      this.permissionState = "unsupported";
-      throw new Error("Camera access is not supported by this browser/context.");
-    }
-
-    // Remember the currently active device before stopping it. If a browser does
-    // not expose facingMode, we can still fall back to a different physical input.
-    const previousDeviceId = this.currentStream?.getVideoTracks()[0]?.getSettings().deviceId || "";
-
+    // Stop any existing tracks
     this.stopCamera();
 
-    const baseVideo: MediaTrackConstraints = {
-      width: { ideal: resWidth },
-      height: { ideal: resHeight },
-    };
-
-    const requestExactFacing = async () => {
-      return navigator.mediaDevices.getUserMedia({
-        audio: false,
-        video: {
-          ...baseVideo,
-          facingMode: { exact: requestedFacing },
-        },
-      });
-    };
+    if (!navigator?.mediaDevices?.getUserMedia) {
+      this.permissionState = "unsupported";
+      throw new Error("navigator.mediaDevices.getUserMedia is not supported on this browser or context.");
+    }
 
     try {
-      let stream: MediaStream;
+      const constraints: MediaStreamConstraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: facing },
+          width: { ideal: resWidth },
+          height: { ideal: resHeight },
+        },
+      };
 
-      try {
-        // Primary path: exact facingMode, not "ideal".
-        stream = await requestExactFacing();
-      } catch (err: any) {
-        // Some desktop/browser implementations do not support facingMode
-        // selection reliably. Fall back to a different physical video input.
-        if (
-          err?.name === "NotAllowedError" ||
-          err?.name === "PermissionDeniedError" ||
-          err?.name === "SecurityError"
-        ) {
-          this.permissionState = "denied";
-          throw err;
-        }
-
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const videoDevices = devices.filter((d) => d.kind === "videoinput");
-
-        if (videoDevices.length < 2) {
-          throw err;
-        }
-
-        // Prefer labels that identify the requested side, otherwise choose a
-        // different physical camera from the one that was previously active.
-        const label = (d: MediaDeviceInfo) => (d.label || "").toLowerCase();
-        const frontHints = ["front", "user", "facetime", "integrated", "selfie"];
-        const rearHints = ["back", "rear", "environment", "world", "main", "wide", "camera 0"];
-
-        const hints = requestedFacing === "user" ? frontHints : rearHints;
-        const hinted = videoDevices.find(
-          (d) => d.deviceId !== previousDeviceId && hints.some((h) => label(d).includes(h))
-        );
-        const different = videoDevices.find((d) => d.deviceId !== previousDeviceId);
-        const selected = hinted || different || videoDevices[0];
-
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: false,
-          video: {
-            ...baseVideo,
-            deviceId: { exact: selected.deviceId },
-          },
-        });
-      }
-
-      const track = stream.getVideoTracks()[0];
-      const settings = track?.getSettings?.();
-      const actualFacing = settings?.facingMode;
-
-      // If the browser reports a different facing mode than requested, do not
-      // pretend the switch succeeded. Release the wrong camera immediately.
-      if (actualFacing && actualFacing !== requestedFacing) {
-        stream.getTracks().forEach((t) => t.stop());
-        throw new Error(
-          `Requested ${requestedFacing === "user" ? "front" : "rear"} camera, but the browser opened ${actualFacing === "user" ? "front" : "rear"} camera.`
-        );
-      }
-
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       this.currentStream = stream;
       this.videoElement.srcObject = stream;
       await this.videoElement.play();
 
-      this.facingMode = requestedFacing;
       this.isRunning = true;
       this.permissionState = "granted";
       return stream;
     } catch (err: any) {
-      this.isRunning = false;
-      if (err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError") {
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
         this.permissionState = "denied";
+      } else {
+        // Retry with basic fallback constraints
+        try {
+          const fallbackStream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: true,
+          });
+          this.currentStream = fallbackStream;
+          this.videoElement.srcObject = fallbackStream;
+          await this.videoElement.play();
+          this.isRunning = true;
+          this.permissionState = "granted";
+          return fallbackStream;
+        } catch (fallbackErr: any) {
+          this.permissionState = "denied";
+          throw fallbackErr;
+        }
       }
       throw err;
     }
@@ -190,20 +135,9 @@ export class CameraManager {
   }
 
   public async switchCamera(): Promise<"user" | "environment"> {
-    // Prevent double-taps from racing two getUserMedia requests.
-    if (this.switchInProgress) return this.switchInProgress;
-
     const targetFacing = this.facingMode === "user" ? "environment" : "user";
-    this.switchInProgress = (async () => {
-      await this.startCamera(targetFacing, this.targetResolution.label);
-      return this.facingMode;
-    })();
-
-    try {
-      return await this.switchInProgress;
-    } finally {
-      this.switchInProgress = null;
-    }
+    await this.startCamera(targetFacing, this.targetResolution.label);
+    return this.facingMode;
   }
 
   public startRecording(canvasSource: HTMLCanvasElement): void {

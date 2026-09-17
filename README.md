@@ -1,6 +1,6 @@
 # Commercial AR Camera SDK Prototype
 
-A web-first, GPU-accelerated Camera SDK architecture designed for real-time mobile and web camera experiences similar to TikTok and Snapchat. The engine orchestrates three independent compositing layers on live camera feeds:
+A high-performance, GPU-accelerated Camera SDK architecture designed for real-time mobile and web camera experiences similar to TikTok and Snapchat. The engine orchestrates three independent compositing layers on live camera feeds:
 
 1. **Beauty Engine**: GPU-accelerated edge-preserving bilateral skin smoothing, skin tone enhancement, highlight bloom glow, teeth whitening, lip pigmentation, and geometric mesh-warp deformation (face slimming, eye enlargement, nose slimming, jaw contouring).
 2. **Effects Engine**: Real-time full-frame fragment shaders including color grading, dream bloom, vintage sepia, neon chromatic aberration, and cinematic film tonemapping.
@@ -23,7 +23,7 @@ Camera Input (getUserMedia / Hardware Camera)
            └── Pass 4: Face-Anchored AR Overlays (Cat, Dog, Glasses, Crown, Mask, etc.)
                    │
                    ▼
-         Unified Live Preview Canvas (30 FPS target, adaptive on mobile)
+         Unified Live Preview Canvas (60 FPS)
                    │
                    ├──► Snapshot Capture (JPEG dataURI)
                    └──► Video Recording (MediaRecorder WebM / MP4)
