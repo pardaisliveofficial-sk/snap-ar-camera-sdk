@@ -15,6 +15,7 @@ export class GpuPipeline {
   private passthroughProgram: WebGLProgram | null = null;
   private isSupported: boolean = false;
   private textureYFlipCompensated: boolean = true;
+  private lastSkinMaskUpdateTime = 0;
 
   // Multi-pass Framebuffer for simultaneous Beauty + Effects compositing
   private fbo: WebGLFramebuffer | null = null;
@@ -29,7 +30,7 @@ export class GpuPipeline {
     this.skinMaskCanvas = document.createElement("canvas");
     this.skinMaskCanvas.width = 256;
     this.skinMaskCanvas.height = 256;
-    this.skinMaskCtx = this.skinMaskCanvas.getContext("2d", { willReadFrequently: false });
+    this.skinMaskCtx = this.skinMaskCanvas.getContext("2d", { willReadFrequently: true });
     this.initWebGL();
   }
 
@@ -285,9 +286,11 @@ export class GpuPipeline {
           // Beauty must be skin-only. Do not use the whole face oval as a fallback
           // because that makes hair/beard/background look like a color filter.
           // Use chroma as a hard gate and keep a soft geometric falloff around it.
+          // trackedSkin is now an image-derived adaptive skin probability mask.
+          // Do not multiply it by another hard chroma classifier here: doing so
+          // was the source of isolated cheek circles under difficult lighting.
           float geometryMask = faceMask * trackedSkin;
-          float skinConfidence = smoothstep(0.10, 0.42, chromaSkin);
-          skinMask = geometryMask * skinConfidence;
+          skinMask = geometryMask;
           skinMask *= (1.0 - eyeCut * 0.995) * (1.0 - mouthCut * 0.98) * (1.0 - browCut * 0.96);
           skinMask = smoothstep(0.025, 0.22, skinMask);
         }
@@ -325,13 +328,13 @@ export class GpuPipeline {
 
         if (u_tone > 0.0 && skinMask > 0.01) {
           vec3 healthy = color * vec3(1.012, 1.006, 0.998) + vec3(0.003, 0.002, 0.001);
-          color = mix(color, healthy, (u_tone / 100.0) * skinMask * 0.62);
+          color = mix(color, healthy, (u_tone / 100.0) * skinMask * 0.18);
         }
 
         if (u_glow > 0.0 && skinMask > 0.01) {
           float lum = dot(color, vec3(0.299, 0.587, 0.114));
           float hi = smoothstep(0.38, 0.82, lum);
-          color += vec3(1.0, 0.985, 0.97) * hi * (u_glow / 100.0) * skinMask * 0.16;
+          color += vec3(1.0, 0.985, 0.97) * hi * (u_glow / 100.0) * skinMask * 0.035;
         }
 
         if (u_eyeBright > 0.0 && u_faceDetected == 1) {
@@ -740,49 +743,107 @@ export class GpuPipeline {
     }
   }
 
-  private updateSkinMask(landmarks: FaceLandmarksData): void {
+  private static smoothstepCPU(edge0: number, edge1: number, x: number): number {
+    const t = Math.max(0, Math.min(1, (x-edge0)/((edge1-edge0)||1)));
+    return t*t*(3-2*t);
+  }
+
+  // Automatic skin segmentation from the actual camera pixels. This is the
+  // foundation of the custom SnapAR Beauty Engine: tracking supplies the face
+  // geometry, while the image supplies the skin probability. No third-party
+  // beauty SDK is used.
+  private updateSkinMask(video: HTMLVideoElement, landmarks: FaceLandmarksData): void {
     if (!this.gl || !this.skinMaskTexture || !this.skinMaskCtx) return;
+    const now = performance.now();
+    // The mask does not need to be regenerated at display refresh rate. Updating
+    // it 10x/sec keeps the mask responsive while avoiding a CPU bottleneck.
+    if (now - this.lastSkinMaskUpdateTime < 100) return;
+    this.lastSkinMaskUpdateTime = now;
+
     const ctx = this.skinMaskCtx;
     const size = 256;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, size, size);
     if (!landmarks.faceDetected || !landmarks.points468 || landmarks.points468.length < 200) return;
 
-    // MediaPipe face-oval contour, ordered around the visible face boundary.
-    const oval = [10,338,297,332,284,251,389,356,454,323,361,288,397,365,379,378,400,377,152,148,176,149,150,136,172,58,132,93,234,127,162,21,54,103,67,109];
-    ctx.beginPath();
-    oval.forEach((idx, i) => {
-      const p = landmarks.points468![idx];
-      if (!p) return;
-      const x = p.x * size;
-      // Shader samples the camera texture in texture-space (Y=0 at bottom).
-      // FaceLandmarker points are video-space (Y=0 at top), so convert here.
-      const y = (1 - p.y) * size;
-      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    ctx.drawImage(video, 0, 0, size, size);
+    const image = ctx.getImageData(0, 0, size, size);
+    const data = image.data;
+    const out = new Uint8ClampedArray(size * size * 4);
+
+    const cx = ((landmarks.leftCheek.x + landmarks.rightCheek.x) * 0.5) * size;
+    const cy = ((landmarks.forehead.y + landmarks.chin.y) * 0.5) * size;
+    const rx = Math.max(18, Math.hypot(landmarks.rightCheek.x - landmarks.leftCheek.x, 0) * size * 0.72);
+    const ry = Math.max(24, Math.abs(landmarks.chin.y - landmarks.forehead.y) * size * 0.58);
+
+    const rgbToYCbCr = (r: number, g: number, b: number) => ({
+      y: 0.299*r + 0.587*g + 0.114*b,
+      cb: -0.168736*r - 0.331264*g + 0.5*b + 128,
+      cr: 0.5*r - 0.418688*g - 0.081312*b + 128,
     });
-    ctx.closePath();
-    ctx.fillStyle = "rgba(255,255,255,1)";
-    ctx.fill();
 
-    // Cut out features that must remain crisp.
-    ctx.globalCompositeOperation = "destination-out";
-    const cutEllipse = (cx: number, cy: number, rx: number, ry: number) => {
-      ctx.beginPath();
-      ctx.ellipse(cx * size, cy * size, rx * size, ry * size, 0, 0, Math.PI * 2);
-      ctx.fill();
+    // Estimate the person's current skin color from multiple face locations.
+    // This makes the mask adapt to warm/cool lighting and different skin tones.
+    const seeds = [landmarks.leftCheek, landmarks.rightCheek, landmarks.forehead];
+    let sy=0, scb=0, scr=0, count=0;
+    for (const seed of seeds) {
+      const sx=Math.max(2,Math.min(size-3,Math.round(seed.x*size)));
+      const syy=Math.max(2,Math.min(size-3,Math.round(seed.y*size)));
+      for(let dy=-2;dy<=2;dy++) for(let dx=-2;dx<=2;dx++) {
+        const i=((syy+dy)*size+(sx+dx))*4;
+        const c=rgbToYCbCr(data[i],data[i+1],data[i+2]);
+        if(c.y>12 && c.y<245){sy+=c.y;scb+=c.cb;scr+=c.cr;count++;}
+      }
+    }
+    if(!count) return;
+    sy/=count;scb/=count;scr/=count;
+
+    // Only evaluate the face bounding region. A soft geometric boundary plus
+    // adaptive color likelihood creates one continuous skin region rather than
+    // the isolated cheek circles produced by the old hard chroma classifier.
+    const minX=Math.max(0,Math.floor(cx-rx-8)), maxX=Math.min(size-1,Math.ceil(cx+rx+8));
+    const minY=Math.max(0,Math.floor(cy-ry-8)), maxY=Math.min(size-1,Math.ceil(cy+ry+8));
+    for(let y=minY;y<=maxY;y++) for(let x=minX;x<=maxX;x++) {
+      const dx=(x-cx)/rx, dy=(y-cy)/ry;
+      const geo=1-Math.min(1,Math.sqrt(dx*dx+dy*dy));
+      if(geo<=0) continue;
+      const i=(y*size+x)*4;
+      const c=rgbToYCbCr(data[i],data[i+1],data[i+2]);
+      const dY=Math.abs(c.y-sy), dCb=Math.abs(c.cb-scb), dCr=Math.abs(c.cr-scr);
+      const colorMatch=Math.exp(-(dY*dY)/(2*38*38) -(dCb*dCb)/(2*25*25) -(dCr*dCr)/(2*30*30));
+      const broadSkin = this.smoothstepCPU(105, 88, c.cb) * this.smoothstepCPU(118, 138, c.cr) * this.smoothstepCPU(-2, 18, c.cr-c.cb);
+      const relativeLuma = this.smoothstepCPU(Math.max(8, sy*0.38), Math.max(20, sy*0.58), c.y)
+        * (1-this.smoothstepCPU(Math.min(245, sy*1.55), Math.min(255, sy*1.85), c.y));
+      const p=Math.min(1, (colorMatch*0.82 + broadSkin*0.18) * relativeLuma * (0.35 + geo*0.65));
+      out[i+3]=Math.round(p*255);
+      out[i]=255;out[i+1]=255;out[i+2]=255;
+    }
+
+    // Feather the mask slightly so its boundary is invisible in the final image.
+    const alpha=new Uint8ClampedArray(size*size);
+    for(let i=0;i<alpha.length;i++) alpha[i]=out[i*4+3];
+    const feather=new Uint8ClampedArray(alpha.length);
+    for(let y=1;y<size-1;y++) for(let x=1;x<size-1;x++) {
+      let sum=0;
+      for(let ky=-1;ky<=1;ky++) for(let kx=-1;kx<=1;kx++) sum+=alpha[(y+ky)*size+(x+kx)];
+      feather[y*size+x]=Math.round(sum/9);
+    }
+    for(let i=0;i<alpha.length;i++) out[i*4+3]=feather[i]<18?0:Math.min(255,Math.round(feather[i]*1.22));
+
+    ctx.putImageData(new ImageData(out,size,size),0,0);
+    ctx.globalCompositeOperation='destination-out';
+    const cut=(px:number,py:number,rx2:number,ry2:number)=>{
+      ctx.beginPath();ctx.ellipse(px*size,py*size,rx2*size,ry2*size,0,0,Math.PI*2);ctx.fill();
     };
-    const eyeDistance = Math.max(Math.hypot(landmarks.rightEye.x - landmarks.leftEye.x, landmarks.rightEye.y - landmarks.leftEye.y), 0.05);
-    cutEllipse(landmarks.leftEye.x, landmarks.leftEye.y, eyeDistance * 0.18, eyeDistance * 0.10);
-    cutEllipse(landmarks.rightEye.x, landmarks.rightEye.y, eyeDistance * 0.18, eyeDistance * 0.10);
-    cutEllipse(landmarks.mouthCenter.x, landmarks.mouthCenter.y, eyeDistance * 0.34, eyeDistance * 0.16);
-    // A small nostril/bridge exclusion avoids smoothing the most detailed nose pixels.
-    cutEllipse(landmarks.noseTip.x, landmarks.noseTip.y, eyeDistance * 0.14, eyeDistance * 0.12);
-    ctx.globalCompositeOperation = "source-over";
+    const ed=Math.max(Math.hypot(landmarks.rightEye.x-landmarks.leftEye.x,landmarks.rightEye.y-landmarks.leftEye.y),0.05);
+    cut(landmarks.leftEye.x,landmarks.leftEye.y,ed*0.22,ed*0.13);
+    cut(landmarks.rightEye.x,landmarks.rightEye.y,ed*0.22,ed*0.13);
+    cut(landmarks.mouthCenter.x,landmarks.mouthCenter.y,ed*0.40,ed*0.20);
+    ctx.globalCompositeOperation='source-over';
 
-    const gl = this.gl;
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.skinMaskTexture);
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.skinMaskCanvas);
+    const gl=this.gl;
+    gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,this.skinMaskTexture);
+    gl.texSubImage2D(gl.TEXTURE_2D,0,0,0,gl.RGBA,gl.UNSIGNED_BYTE,this.skinMaskCanvas);
   }
 
   private setBeautyUniforms(
@@ -903,7 +964,7 @@ export class GpuPipeline {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
 
     if (beautyEnabled && landmarks.faceDetected) {
-      this.updateSkinMask(landmarks);
+      this.updateSkinMask(video, landmarks);
     }
 
     // Determine active pipeline stages based on comparison mode

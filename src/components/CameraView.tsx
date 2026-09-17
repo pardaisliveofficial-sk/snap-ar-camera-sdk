@@ -208,8 +208,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
         const satLift = builtIn ? Math.round((filterIntensity - 50) * 0.08) : 0;
         const beautyConfig: BeautyConfig = {
           smooth: Math.min(100, beautyParams.skinSmoothing + builtInBoost),
-          glow: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.22),
-          tone: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.16),
+          glow: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.08),
+          tone: Math.min(100, beautyParams.skinToneGlow + (builtIn?.parameters.glow ?? 0) * 0.06),
           brightness: Math.max(85, Math.min(120, beautyParams.brightness + colorLift)),
           contrast: Math.max(90, Math.min(115, beautyParams.contrast + colorLift * 0.5)),
           saturation: Math.max(85, Math.min(125, beautyParams.saturation + satLift)),
