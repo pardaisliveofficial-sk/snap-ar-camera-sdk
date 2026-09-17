@@ -264,10 +264,14 @@ export class GpuPipeline {
           // geometry constraint; chroma only decides which face pixels are skin.
           // Unlike the previous max(chroma, 0.62) fallback, this does not blur
           // beard/hair simply because they sit inside the face oval.
-          float cb = 1.0 - smoothstep(0.18, 0.66, Cb);
-          float cr = smoothstep(0.32, 0.40, Cr) * (1.0 - smoothstep(0.74, 0.82, Cr));
-          float luminanceGate = smoothstep(0.035, 0.72, Y);
-          float chromaSkin = clamp(cb * cr * luminanceGate, 0.0, 1.0);
+          // Conservative skin chroma confidence. This is intentionally a
+          // confidence mask, not a color wash: neutral/white pixels and dark
+          // beard/hair should not become beauty targets.
+          float cbBand = smoothstep(0.28, 0.36, Cb) * (1.0 - smoothstep(0.58, 0.66, Cb));
+          float crBand = smoothstep(0.44, 0.50, Cr) * (1.0 - smoothstep(0.78, 0.84, Cr));
+          float warmBias = smoothstep(0.02, 0.16, Cr - Cb);
+          float luminanceGate = smoothstep(0.07, 0.24, Y) * (1.0 - smoothstep(0.88, 0.98, Y));
+          float chromaSkin = clamp(cbBand * crBand * warmBias * luminanceGate * 2.4, 0.0, 1.0);
           float trackedSkin = texture2D(u_skinMask, uv).r;
 
           float eyeR = max(distance(u_leftEye, u_rightEye) * 0.15, 0.035);
@@ -278,48 +282,56 @@ export class GpuPipeline {
                               ellipseMask(uv, u_rightEye + vec2(0.0, -radius.y * 0.18), vec2(eyeR * 1.7, eyeR * 0.65)));
           // The face ellipse is only a fallback support mask; chroma + facial
           // feature exclusions keep the enhancement on skin and off hair/eyes/lips.
-          float geometryMask = max(faceMask, trackedSkin);
-          skinMask = geometryMask * (0.18 + 0.82 * chromaSkin) * (1.0 - eyeCut * 0.98) * (1.0 - mouthCut * 0.94) * (1.0 - browCut * 0.90);
-          skinMask = smoothstep(0.05, 0.32, skinMask);
+          // Beauty must be skin-only. Do not use the whole face oval as a fallback
+          // because that makes hair/beard/background look like a color filter.
+          // Use chroma as a hard gate and keep a soft geometric falloff around it.
+          float geometryMask = faceMask * trackedSkin;
+          float skinConfidence = smoothstep(0.10, 0.42, chromaSkin);
+          skinMask = geometryMask * skinConfidence;
+          skinMask *= (1.0 - eyeCut * 0.995) * (1.0 - mouthCut * 0.98) * (1.0 - browCut * 0.96);
+          skinMask = smoothstep(0.025, 0.22, skinMask);
         }
 
         // Stage 2 skin retouch: stronger multi-radius edge-aware smoothing.
         if (u_smooth > 0.0 && skinMask > 0.01) {
           vec2 px = 1.0 / u_resolution;
-          vec3 sum = color * 3.0;
-          float total = 3.0;
-          for (int i = 0; i < 12; i++) {
-            float a = 0.523599 * float(i);
-            float radius = (i < 6 ? 2.0 : 4.0);
+          // Large-radius bilateral-like skin smoothing. The previous 2/4px pass
+          // was visually too weak on phone previews. Keep edge-aware weighting so
+          // eyes/lips/nose details survive while pores/noise are visibly reduced.
+          vec3 sum = color * 2.5;
+          float total = 2.5;
+          for (int i = 0; i < 16; i++) {
+            float a = 0.392699 * float(i);
+            float radius = (i < 8 ? 4.0 : 8.0);
             vec2 off = vec2(cos(a), sin(a)) * px * radius;
             vec3 sampleColor = texture2D(u_image, uv + off).rgb;
             float colorDistance = distance(sampleColor, color);
-            float cw = exp(-colorDistance * 16.0);
+            float cw = exp(-colorDistance * 22.0);
             sum += sampleColor * cw;
             total += cw;
           }
           vec3 smooth = sum / total;
           float level = smoothstep(0.0, 1.0, u_smooth / 100.0);
-          float strength = level * skinMask * (0.62 + 0.30 * level);
+          float strength = level * skinMask * (0.48 + 0.16 * level);
           color = mix(color, smooth, strength);
           vec3 localDetail = color - smooth;
-          float detailKeep = 0.24 + (u_sharpness / 100.0) * 0.30;
+          float detailKeep = 0.28 + (u_sharpness / 100.0) * 0.24;
           color += localDetail * detailKeep * skinMask;
           if (u_noiseReduction > 0.0) {
-            float denoise = (u_noiseReduction / 100.0) * skinMask * 0.28;
+            float denoise = (u_noiseReduction / 100.0) * skinMask * 0.22;
             color = mix(color, smooth, denoise);
           }
         }
 
         if (u_tone > 0.0 && skinMask > 0.01) {
-          vec3 healthy = color * vec3(1.035, 1.012, 0.992) + vec3(0.010, 0.006, 0.004);
-          color = mix(color, healthy, (u_tone / 100.0) * skinMask * 0.96);
+          vec3 healthy = color * vec3(1.012, 1.006, 0.998) + vec3(0.003, 0.002, 0.001);
+          color = mix(color, healthy, (u_tone / 100.0) * skinMask * 0.62);
         }
 
         if (u_glow > 0.0 && skinMask > 0.01) {
           float lum = dot(color, vec3(0.299, 0.587, 0.114));
           float hi = smoothstep(0.38, 0.82, lum);
-          color += vec3(1.0, 0.975, 0.95) * hi * (u_glow / 100.0) * skinMask * 0.34;
+          color += vec3(1.0, 0.985, 0.97) * hi * (u_glow / 100.0) * skinMask * 0.16;
         }
 
         if (u_eyeBright > 0.0 && u_faceDetected == 1) {
@@ -348,8 +360,8 @@ export class GpuPipeline {
         // computational-photography lift before beauty: recover shadows, open
         // midtones and roll off highlights. This is global and remains subtle.
         float sceneLum = dot(color, vec3(0.299, 0.587, 0.114));
-        float shadowLift = (1.0 - smoothstep(0.10, 0.56, sceneLum)) * 0.105;
-        float midLift = smoothstep(0.18, 0.48, sceneLum) * (1.0 - smoothstep(0.52, 0.86, sceneLum)) * 0.026;
+        float shadowLift = (1.0 - smoothstep(0.08, 0.50, sceneLum)) * 0.075;
+        float midLift = smoothstep(0.16, 0.46, sceneLum) * (1.0 - smoothstep(0.56, 0.90, sceneLum)) * 0.018;
         color += shadowLift + midLift;
 
         float contrast = max(u_contrast / 100.0, 0.01);
@@ -358,13 +370,13 @@ export class GpuPipeline {
         // Gentle highlight compression prevents bright skin from clipping after
         // enhancement, which is especially useful on inexpensive phone cameras.
         float postLum = dot(color, vec3(0.299, 0.587, 0.114));
-        float hiCompress = smoothstep(0.72, 1.0, postLum) * 0.16;
+        float hiCompress = smoothstep(0.76, 1.0, postLum) * 0.08;
         color = mix(color, color / max(1.0 + hiCompress, 0.001), hiCompress);
 
         float gray = dot(color, vec3(0.299, 0.587, 0.114));
         float vib = max(u_vibrance / 100.0, 0.0);
         float chroma = max(max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b)), 0.0);
-        color += (color - vec3(gray)) * vib * (1.0 - chroma) * 0.18;
+        color += (color - vec3(gray)) * vib * (1.0 - chroma) * 0.08;
         color = mix(vec3(gray), color, max(u_saturation / 100.0, 0.0));
 
         if (u_sharpness > 0.0) {
@@ -743,7 +755,9 @@ export class GpuPipeline {
       const p = landmarks.points468![idx];
       if (!p) return;
       const x = p.x * size;
-      const y = p.y * size;
+      // Shader samples the camera texture in texture-space (Y=0 at bottom).
+      // FaceLandmarker points are video-space (Y=0 at top), so convert here.
+      const y = (1 - p.y) * size;
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.closePath();
@@ -821,7 +835,12 @@ export class GpuPipeline {
 
     const setVec2 = (name: string, p: { x: number; y: number }) => {
       const loc = gl.getUniformLocation(prog, name);
-      if (loc) gl.uniform2f(loc, p.x, p.y);
+      if (loc) {
+        // Camera texture coordinates are vertically flipped relative to
+        // FaceLandmarker/video coordinates. Keep every facial anchor in the
+        // same coordinate space as the sampled camera image.
+        gl.uniform2f(loc, p.x, 1 - p.y);
+      }
     };
 
     setVec2("u_leftEye", landmarks.leftEye);
@@ -858,15 +877,21 @@ export class GpuPipeline {
     effectsEnabled: boolean,
     landmarks: FaceLandmarksData,
     mode: RenderComparisonMode,
-    effectIntensity: number = 1.0
+    effectIntensity: number = 1.0,
+    processingMaxWidth: number = 0
   ): HTMLCanvasElement | null {
     if (!this.gl || !this.isSupported || !video || video.readyState < 2) {
       return null;
     }
 
     const gl = this.gl;
-    const w = video.videoWidth || 1280;
-    const h = video.videoHeight || 720;
+    const sourceW = video.videoWidth || 1280;
+    const sourceH = video.videoHeight || 720;
+    // Process at a bounded internal resolution. Camera capture can stay 720p/1080p,
+    // while the GPU beauty pass avoids spending the full shader cost on every source pixel.
+    const maxW = processingMaxWidth > 0 ? processingMaxWidth : sourceW;
+    const w = Math.min(sourceW, maxW);
+    const h = Math.max(1, Math.round((sourceH / sourceW) * w));
 
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w;

@@ -83,6 +83,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
   const lastTrackingTimeRef = useRef(0);
   const lastLandmarksRef = useRef(faceTrackerRef.current.getLandmarks());
   const lastRenderTimeRef = useRef(performance.now());
+  const lastProcessedFrameTimeRef = useRef(0);
 
   // Performance tracking
   const frameCountRef = useRef(0);
@@ -175,14 +176,24 @@ export const CameraView: React.FC<CameraViewProps> = ({
       const video = videoRef.current;
       const canvas = canvasRef.current;
       if (video && canvas && video.readyState >= 2 && video.videoWidth > 0) {
-        const targetW = Math.min(video.videoWidth, 1280);
+        // Keep the camera capture at the requested quality, but process the expensive
+        // beauty shader at a bounded internal resolution. This is the main mobile FPS win.
+        const processingMaxWidth = mobileMode ? 720 : 960;
+        const targetW = Math.min(video.videoWidth, processingMaxWidth);
         const targetH = Math.round((video.videoHeight / video.videoWidth) * targetW);
+        const now = performance.now();
+        // Render the GPU pipeline at ~30 FPS instead of running a multi-tap shader
+        // on every display refresh (60/90/120 Hz).
+        if (now - lastProcessedFrameTimeRef.current < 32) {
+          animId = requestAnimationFrame(renderLoop);
+          return;
+        }
+        lastProcessedFrameTimeRef.current = now;
         if (canvas.width !== targetW || canvas.height !== targetH) {
           canvas.width = targetW;
           canvas.height = targetH;
         }
 
-        const now = performance.now();
         // Face tracking is expensive; keep it around 24-30Hz while the renderer stays smooth.
         if (now - lastTrackingTimeRef.current >= 34) {
           lastLandmarksRef.current = faceTrackerRef.current.update();
@@ -222,7 +233,8 @@ export const CameraView: React.FC<CameraViewProps> = ({
           false,
           landmarks as any,
           "beauty",
-          0
+          0,
+          processingMaxWidth
         );
 
         const ctx = canvas.getContext("2d");
